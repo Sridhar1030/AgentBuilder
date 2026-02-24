@@ -78,3 +78,4 @@ htmlcov/
 student_model/
 venv/
 *.jsonl
+mlflow.db

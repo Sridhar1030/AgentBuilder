@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: student-vllm-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: student-model
+  template:
+    metadata:
+      labels:
+        app: student-model
+    spec:
+      containers:
+      - name: vllm-server
+        image: vllm/vllm-openai:latest-cpu  # The ACTUAL image used in production
+        args:
+        - "--model=/Users/srpillai/AgentBuilder/student_model" # Or your fine-tuned model path
+        - "--port=8000"
+        - "--max-model-len=2048"
+        ports:
+        - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: student-vllm-service
+spec:
+  selector:
+    app: student-model
+  ports:
+  - protocol: TCP
+    port: 8000
+    targetPort: 8000
