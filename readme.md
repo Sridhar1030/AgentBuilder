@@ -2,14 +2,91 @@
 
 An end-to-end pipeline demonstrating how to distill knowledge from a massive 70B parameter Teacher model into a lightweight 1B parameter Student model that runs entirely offline.
 
-## 🧠 The Tech Stack
-* **The Teacher:** Llama-3-70B (Served via Groq API for ultra-fast data generation)
-* **The Training:** Hugging Face `trl` / `SFTTrainer` (QLoRA fine-tuning on a Google Colab T4 GPU)
-* **The Student:** unsloth/Llama-3.2-1B-Instruct
-* **The UI:** Gradio + Hugging Face `pipeline`
+---
 
-## 📂 Repository Structure
-* `datagen.py` - The script that prompts the Groq API to generate synthetic training data.
-* `train_data.json` - The generated instruction/response pairs.
-* `app.py` - The local Gradio UI that loads the fine-tuned PEFT adapters onto the base model.
-* `student_model/` - (Not uploaded due to size) The trained LoRA weights.
+## 📐 Distillation at a glance
+
+```
+        70B params                    text                     1B params
+     ┌─────────────┐              ┌─────────┐              ┌─────────────┐
+     │   TEACHER   │   answers    │  SFT    │   learns     │   STUDENT   │
+     │  Llama 70B  │ ──────────►  │  data   │ ──────────►  │  Llama 1B   │
+     │   (Groq)    │   prompts    │ .json   │   QLoRA      │  + adapters │
+     └─────────────┘              └─────────┘              └──────┬──────┘
+           │                            │                         │
+           │                            │                         │
+           ▼                            ▼                         ▼
+     "Explain X in        instruction + response           Gradio UI /
+      Python..."          pairs (datagen.py)                vLLM / app
+```
+
+---
+
+## 📐 Pipeline overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                          KNOWLEDGE DISTILLATION PIPELINE                                  │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+
+     ┌──────────────┐         ┌──────────────┐         ┌──────────────┐         ┌──────────────┐
+     │   TEACHER    │         │    DATA      │         │   TRAINING   │         │   STUDENT    │
+     │  Llama 70B   │ ──────► │  GENERATION  │ ──────► │  QLoRA /     │ ──────► │  Llama 1B    │
+     │  (Groq API)  │  prompts│ train_data   │  SFT    │  SFTTrainer  │  PEFT   │  + adapters  │
+     └──────────────┘         │   .json      │         │  (Colab T4)  │         └──────┬───────┘
+                             └──────────────┘         └──────────────┘                │
+                                      │                        │                      │
+                                      │ datagen.py                                      │ app.py
+                                      ▼                                                 ▼
+                             ┌─────────────────┐                               ┌──────────────┐
+                             │  Python coding  │                               │  GRADIO UI   │
+                             │  Q&A prompts    │                               │  (inference) │
+                             └─────────────────┘                               └──────────────┘
+```
+
+---
+
+## 🌐 Where each part runs
+
+```
+  ┌──────────────────────────────────────────────────────────────────────────────────┐
+  │  CLOUD (Groq)          │  COLAB (T4 GPU)        │  LOCAL / K8s                    │
+  ├────────────────────────┼────────────────────────┼─────────────────────────────────┤
+  │                        │                        │                                 │
+  │   ┌──────────────┐     │   ┌──────────────┐     │   ┌──────────────┐              │
+  │   │  Teacher     │     │   │  SFTTrainer  │     │   │  Student     │              │
+  │   │  (70B)       │     │   │  QLoRA       │     │   │  (1B)        │              │
+  │   │  inference   │     │   │  fine-tune   │     │   │  inference   │              │
+  │   └──────┬───────┘     │   └──────┬───────┘     │   └──────┬───────┘              │
+  │          │             │          │             │          │                       │
+  │          │  datagen.py calls      │  reads      │          │  app.py or vLLM       │
+  │          │  (from your Mac)       │  train_     │          │  (Gradio / API)       │
+  │          │                        │  data.json │          │                       │
+  └──────────┴────────────────────────┴─────────────┴──────────┴───────────────────────┘
+```
+
+---
+
+## 🧠 Tech stack
+
+| Role      | Component                         | Description                                              |
+|-----------|-----------------------------------|----------------------------------------------------------|
+| **Teacher** | Llama-3-70B (Groq API)           | Fast synthetic data generation                          |
+| **Training** | Hugging Face `trl` / SFTTrainer  | QLoRA fine-tuning on Colab T4 GPU                       |
+| **Student** | unsloth/Llama-3.2-1B-Instruct   | Base model + learned adapters                           |
+| **UI**    | Gradio + Hugging Face `pipeline` | Local chat interface over the distilled model           |
+
+---
+
+## 📂 Repository structure
+
+```
+AgentBuilder/
+│
+├── 📜 datagen.py              Groq API → instruction/response pairs → train_data.json
+├── 📄 train_data.json         SFT dataset (input for Colab training)
+├── 📜 app.py                  Gradio UI; loads student_model + PEFT adapters
+├── 📁 student_model/          Trained LoRA weights (not in repo; large)
+├── 📜 student-vllm.yaml       K8s deploy for serving student via vLLM
+└── 📄 DEPLOY-STUDENT-VLLM.md  Step-by-step K8s deploy guide
+```
