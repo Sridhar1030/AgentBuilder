@@ -1,0 +1,80 @@
+# —— Python —————————————————————————————————————————————————————
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# —— Jupyter ——————————————————————————————————————————————————————
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# —— Environment & secrets ————————————————————————————————————————
+.env
+.env.local
+.env.*.local
+*.pem
+secrets/
+
+# —— ML / Hugging Face —————————————————————————————————────────————
+.cache/
+huggingface/
+*.bin
+*.safetensors
+checkpoint-*/
+output/
+runs/
+wandb/
+*.ckpt
+*.pt
+*.pth
+
+# —— Data (uncomment if you don’t want to track generated data) ——
+# train_data.json
+# *.jsonl
+
+# —— OS —————————————————————————————————————————————————────────——
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+
+# —— IDE —————————————————————————————————————————————————────────—
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# —— Logs & misc —————————————————————————————————────────────────——
+*.log
+logs/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+student_model/
+venv/
+*.jsonl
