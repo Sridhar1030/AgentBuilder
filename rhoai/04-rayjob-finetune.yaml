@@ -1,0 +1,68 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: student-finetune-job
+  namespace: sridharproject
+spec:
+  submissionMode: K8sJobMode
+  entrypoint: "python /home/ray/finetune.py"
+  runtimeEnvYAML: |
+    pip:
+      - torch>=2.1.0
+      - transformers>=4.45.0
+      - peft>=0.13.0
+      - trl>=0.11.0
+      - datasets>=3.0.0
+      - bitsandbytes>=0.43.0
+      - accelerate>=0.34.0
+      - boto3>=1.34.0
+    working_dir: "s3://sridhar-models/training-code/"
+    env_vars:
+      GOLD_DATA_PATH: "s3://sridhar-models/gold-data/gold_pairs.jsonl"
+      OUTPUT_MODEL_PATH: "s3://sridhar-models/student-1b-merged/"
+      BASE_MODEL_ID: "unsloth/Llama-3.2-1B-Instruct"
+      AWS_ACCESS_KEY_ID: "<from-secret>"
+      AWS_SECRET_ACCESS_KEY: "<from-secret>"
+  rayClusterSpec:
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+      template:
+        spec:
+          containers:
+            - name: ray-head
+              image: rayproject/ray:2.38.0-py311
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: "8Gi"
+                limits:
+                  cpu: "4"
+                  memory: "16Gi"
+              volumeMounts:
+                - name: gold-data
+                  mountPath: /data
+          volumes:
+            - name: gold-data
+              persistentVolumeClaim:
+                claimName: gold-data-pvc
+    workerGroupSpecs:
+      - replicas: 1
+        minReplicas: 1
+        maxReplicas: 2
+        groupName: gpu-workers
+        rayStartParams: {}
+        template:
+          spec:
+            containers:
+              - name: ray-worker
+                image: rayproject/ray:2.38.0-py311-gpu
+                resources:
+                  requests:
+                    cpu: "4"
+                    memory: "16Gi"
+                    nvidia.com/gpu: "1"
+                  limits:
+                    cpu: "8"
+                    memory: "32Gi"
+                    nvidia.com/gpu: "1"

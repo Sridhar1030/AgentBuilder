@@ -1,0 +1,38 @@
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: vllm-runtime
+  namespace: sridharproject
+  annotations:
+    opendatahub.io/dashboard: "true"
+spec:
+  supportedModelFormats:
+    - name: vLLM
+      version: "1"
+      autoSelect: true
+  containers:
+    - name: kserve-container
+      image: docker.io/vllm/vllm-openai:v0.7.3
+      command:
+        - python3
+        - -m
+        - vllm.entrypoints.openai.api_server
+      args:
+        - "--model=/mnt/models"
+        - "--port=8080"
+        - "--max-model-len=512"
+        - "--dtype=half"
+        - "--enforce-eager"
+        - "--gpu-memory-utilization=0.60"
+        - "--max-num-seqs=16"
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      volumeMounts:
+        - name: shm
+          mountPath: /dev/shm
+  volumes:
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 2Gi

@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: distillation-ui
+  namespace: sridharproject
+  labels:
+    app: distillation-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: distillation-ui
+  template:
+    metadata:
+      labels:
+        app: distillation-ui
+    spec:
+      containers:
+        - name: gradio
+          image: quay.io/sridhar/distillation-ui:latest    # <-- push your built image here
+          ports:
+            - containerPort: 7860
+          env:
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: groq-api-secret
+                  key: GROQ_API_KEY
+            - name: STUDENT_ENDPOINT
+              value: "http://student-llm-predictor.sridharproject.svc.cluster.local:8080/v1"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.sridharproject.svc.cluster.local:5000"
+            - name: GOLD_LOG_PATH
+              value: "/data/gold_pairs.jsonl"
+          volumeMounts:
+            - name: gold-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: gold-data
+          persistentVolumeClaim:
+            claimName: gold-data-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gold-data-pvc
+  namespace: sridharproject
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: groq-api-secret
+  namespace: sridharproject
+type: Opaque
+stringData:
+  GROQ_API_KEY: "<YOUR_GROQ_API_KEY>"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: distillation-ui
+  namespace: sridharproject
+spec:
+  selector:
+    app: distillation-ui
+  ports:
+    - port: 7860
+      targetPort: 7860
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: distillation-ui
+  namespace: sridharproject
+spec:
+  to:
+    kind: Service
+    name: distillation-ui
+  port:
+    targetPort: 7860
+  tls:
+    termination: edge

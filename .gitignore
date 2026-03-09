@@ -76,6 +76,9 @@ htmlcov/
 .tox/
 .mypy_cache/
 student_model/
+student_model_merged/
 venv/
+venv311/
 *.jsonl
 mlflow.db
+taskDone.txt
