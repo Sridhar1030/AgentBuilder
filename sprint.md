@@ -34,17 +34,29 @@ All 10 tasks done. Local Gradio app at `http://127.0.0.1:7860` sends questions t
 
 ---
 
-## Sprint 2: MLflow on-cluster (Future)
+## Sprint 2: MLflow on-cluster
 
 **Goal:** Move experiment tracking from local SQLite to a proper MLflow server on the cluster so traces persist and are accessible from anywhere.
 
+**Definition of Done:** Traces from the Gradio app appear in the MLflow UI on the cluster.
 
-| #   | Task                                     | Status      | Notes |
-| --- | ---------------------------------------- | ----------- | ----- |
-| 2.1 | Check if RHOAI MLflow is available       | NOT STARTED |       |
-| 2.2 | Create MLflow instance in sridharproject | NOT STARTED |       |
-| 2.3 | Update local app.py MLFLOW_TRACKING_URI  | NOT STARTED |       |
-| 2.4 | Verify traces appear in MLflow UI        | NOT STARTED |       |
+
+| #   | Task                                     | Status | Notes                                                                                          |
+| --- | ---------------------------------------- | ------ | ---------------------------------------------------------------------------------------------- |
+| 2.1 | Create mlflow-artifacts bucket in MinIO  | DONE   | `mc mb myminio/mlflow-artifacts` — separate bucket from model weights                          |
+| 2.2 | Deploy standalone MLflow server          | DONE   | Deployment + PVC + Service in sridharproject. RHOAI operator was namespace-scoped, used standalone instead |
+| 2.3 | Expose MLflow Route                      | DONE   | `https://mlflow-sridharproject.apps.sridhartest-pool-7f6n4.aws.rh-ods.com` — edge TLS          |
+| 2.4 | Update app.py MLFLOW_TRACKING_URI        | DONE   | Default URI now points to cluster MLflow. Added `MLFLOW_TRACKING_INSECURE_TLS=true`             |
+| 2.5 | Smoke test: traces in cluster MLflow     | DONE   | 3 `chat_interaction` traces logged, artifacts in `s3://mlflow-artifacts/1/traces/`              |
+
+### Sprint 2 Complete
+
+MLflow server running on-cluster with MinIO artifact storage. Traces from local Gradio app persist centrally. MLflow UI at `https://mlflow-sridharproject.apps.sridhartest-pool-7f6n4.aws.rh-ods.com`.
+
+**Launch command** (needs both port-forwards running):
+```
+AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin123 MLFLOW_S3_ENDPOINT_URL=http://localhost:9000 STUDENT_ENDPOINT=http://localhost:8080/v1 python app.py
+```
 
 
 ---
@@ -112,4 +124,4 @@ All 10 tasks done. Local Gradio app at `http://127.0.0.1:7860` sends questions t
 
 ---
 
-*Last updated: 2026-03-09*
+*Last updated: 2026-03-09 (Sprint 2 done)*

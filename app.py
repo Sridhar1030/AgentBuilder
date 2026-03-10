@@ -16,7 +16,10 @@ STUDENT_ENDPOINT = os.getenv(
     "STUDENT_ENDPOINT",
     "http://student-llm-predictor.sridharproject.svc.cluster.local:8080/v1"
 )
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
+MLFLOW_TRACKING_URI = os.getenv(
+    "MLFLOW_TRACKING_URI",
+    "http://mlflow-sridharproject.apps.sridhartest-pool-7f6n4.aws.rh-ods.com"
+)
 
 TEACHER_MODEL = "llama-3.3-70b-versatile"
 STUDENT_MODEL_LABEL = "Llama-3.2-1B-Student (KServe)"
