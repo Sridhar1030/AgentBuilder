@@ -61,16 +61,24 @@ AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin123 MLFLOW_S3_ENDPO
 
 ---
 
-## Sprint 3: Gold Data Pipeline (Future)
+## Sprint 3: Gold Data Pipeline
 
 **Goal:** 70B Teacher interactions captured in MLflow are automatically extracted into a training-ready dataset.
 
+**Definition of Done:** Training-ready JSONL file in MinIO, validated for SFT format.
 
-| #   | Task                                 | Status      | Notes |
-| --- | ------------------------------------ | ----------- | ----- |
-| 3.1 | Run gold_extractor.py against MLflow | NOT STARTED |       |
-| 3.2 | Upload gold dataset to MinIO         | NOT STARTED |       |
-| 3.3 | Validate dataset format for SFT      | NOT STARTED |       |
+
+| #   | Task                                    | Status | Notes                                                                       |
+| --- | --------------------------------------- | ------ | --------------------------------------------------------------------------- |
+| 3.0 | Generate 70B Teacher interactions       | DONE   | 10 diverse Q&A pairs via Groq (Llama-3.3-70B) logged in MLflow             |
+| 3.1 | Update gold_extractor.py for cluster    | DONE   | Rewritten for MLflow v3 trace format (request/response columns)             |
+| 3.2 | Run gold_extractor.py, extract pairs    | DONE   | 10/15 traces identified as teacher pairs                                    |
+| 3.3 | Upload gold dataset to MinIO            | DONE   | `s3://mlflow-artifacts/gold/train.jsonl` — 35KiB                            |
+| 3.4 | Validate dataset format for SFT         | DONE   | All 10 examples valid. Keys: instruction, output, text. Avg 1690 chars/output |
+
+### Sprint 3 Complete
+
+Gold data pipeline working end-to-end: Teacher traces in MLflow → `gold_extractor.py` → validated JSONL → MinIO. Ready for fine-tuning in Sprint 4.
 
 
 ---
@@ -124,4 +132,6 @@ AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin123 MLFLOW_S3_ENDPO
 
 ---
 
-*Last updated: 2026-03-09 (Sprint 2 done)*
+*Last updated: 2026-03-10 (Sprint 3 done)*
+
+

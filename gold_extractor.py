@@ -3,9 +3,9 @@ Gold Extractor — pulls 70B teacher Q&A pairs from MLflow traces
 and writes them into a consolidated training file.
 
 Usage:
-    python gold_extractor.py                       # local default
-    python gold_extractor.py --output s3://bucket/gold_pairs.jsonl
-    python gold_extractor.py --threshold 200       # only export if >= 200 pairs
+    python gold_extractor.py
+    python gold_extractor.py --output s3://mlflow-artifacts/gold/train.jsonl
+    python gold_extractor.py --threshold 200
 """
 
 import os
@@ -16,7 +16,10 @@ load_dotenv()
 
 import mlflow
 
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
+MLFLOW_TRACKING_URI = os.getenv(
+    "MLFLOW_TRACKING_URI",
+    "http://mlflow-sridharproject.apps.sridhartest-pool-7f6n4.aws.rh-ods.com"
+)
 EXPERIMENT_NAME = "Distillation-Eval-Hub"
 
 
@@ -29,29 +32,34 @@ def extract_gold_pairs(min_threshold: int = 0) -> list[dict]:
 
     traces = mlflow.search_traces(
         experiment_ids=[experiment.experiment_id],
-        filter_string="attributes.`mlflow.traceName` = 'chat_interaction'",
+        max_results=1000,
     )
 
     gold_pairs = []
-    for _, trace_row in traces.iterrows():
-        attrs = trace_row.get("request_metadata", {}) or {}
-        if not isinstance(attrs, dict):
-            continue
-        if attrs.get("model") != "teacher-70b":
-            continue
-        if attrs.get("is_training_candidate") != "True":
+    for _, row in traces.iterrows():
+        req = row.get("request")
+        resp = row.get("response")
+        if not req or not resp:
             continue
 
-        question = attrs.get("question", "")
-        response = attrs.get("response", "")
-        if question and response:
+        if isinstance(req, str):
+            req = json.loads(req)
+
+        model_choice = req.get("model_choice", "")
+        if "70B" not in model_choice and "Teacher" not in model_choice:
+            continue
+
+        question = req.get("message", "")
+        answer = resp if isinstance(resp, str) else str(resp)
+
+        if question and answer:
             gold_pairs.append({
                 "instruction": question,
-                "output": response,
-                "text": f"### Instruction:\n{question}\n\n### Response:\n{response}",
+                "output": answer,
+                "text": f"### Instruction:\n{question}\n\n### Response:\n{answer}",
             })
 
-    print(f"Found {len(gold_pairs)} gold teacher pairs.")
+    print(f"Found {len(gold_pairs)} gold teacher pairs out of {len(traces)} total traces.")
 
     if min_threshold and len(gold_pairs) < min_threshold:
         print(f"Below threshold ({min_threshold}). Skipping export.")
@@ -66,18 +74,24 @@ def save_pairs(pairs: list[dict], output_path: str):
         parts = output_path.replace("s3://", "").split("/", 1)
         bucket, key = parts[0], parts[1]
         body = "\n".join(json.dumps(p) for p in pairs)
-        s3 = boto3.client("s3")
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000"),
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID", "minioadmin"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY", "minioadmin123"),
+        )
         s3.put_object(Bucket=bucket, Key=key, Body=body.encode())
         print(f"Uploaded {len(pairs)} pairs to {output_path}")
     else:
         with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(pairs, f, indent=2)
+            for p in pairs:
+                f.write(json.dumps(p) + "\n")
         print(f"Saved {len(pairs)} pairs to {output_path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract gold training pairs from MLflow")
-    parser.add_argument("--output", default="train_data_v2.json")
+    parser.add_argument("--output", default="gold_train.jsonl")
     parser.add_argument("--threshold", type=int, default=0)
     args = parser.parse_args()
 
