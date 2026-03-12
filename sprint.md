@@ -92,16 +92,16 @@ Gold data pipeline working end-to-end: Teacher traces in MLflow → `gold_extrac
 
 | #   | Task                                           | Status | Notes                                                                                                   |
 | --- | ---------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------- |
-| 4.1 | Verify Ray operator is healthy                 | DONE   | `kuberay-operator` Running. CRDs: rayjobs, rayclusters, rayservices                                     |
+| 4.1 | Verify KFT operator is installed               | DONE   | `kubeflow-training-operator` Running. CRD: `pytorchjobs.kubeflow.org`. DSC: `trainingoperator: Managed` |
 | 4.2 | Update finetune.py with in-cluster MinIO config| DONE   | `get_s3_client()` with `MLFLOW_S3_ENDPOINT_URL`, QLoRA 4-bit + SFTTrainer, merge & upload to S3         |
-| 4.3 | Write K8s Job manifest                         | DONE   | Switched from RayJob (submitter bug) to plain K8s Job. ConfigMap mount, anyuid SCC, 1x T4 GPU            |
-| 4.4 | Upload finetune.py to MinIO                    | DONE   | `s3://sridhar-models/training-code/finetune.py`                                                          |
-| 4.5 | Submit Job and monitor training                | DONE   | 3 epochs, 38s total. Loss: 0.96→0.91. LoRA merged into base. Model uploaded to MinIO                     |
+| 4.3 | Write PyTorchJob manifest                      | DONE   | `rhoai/04-pytorchjob-finetune.yaml` — Master replica, `pytorch/pytorch:2.5.1-cuda12.4`, 1x T4 GPU       |
+| 4.4 | Upload finetune.py via ConfigMap               | DONE   | ConfigMap `finetune-script` mounted at `/opt/scripts/finetune.py`                                        |
+| 4.5 | Submit PyTorchJob and monitor training         | DONE   | 3 epochs, 37s. Loss: 0.96→0.91. LoRA merged. Model uploaded to MinIO. PyTorchJob state: Succeeded       |
 | 4.6 | Verify new model files in MinIO                | DONE   | 6 files at `s3://sridhar-models/student-1b-v2/` — model.safetensors (1.48GB), tokenizer, config (1.5GB) |
 
 ### Sprint 4 Complete
 
-QLoRA fine-tuning ran on-cluster (K8s Job with `rayproject/ray:2.38.0-py311-gpu` image, 1x T4 GPU). Trained 3 epochs on 10 gold samples (loss 0.96→0.91). Merged LoRA adapters and uploaded to `s3://sridhar-models/student-1b-v2/`. Ready for canary deployment in Sprint 5.
+QLoRA fine-tuning ran on-cluster via **Kubeflow Training Operator** (`PyTorchJob`) on `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime` with 1x T4 GPU. Trained 3 epochs on 10 gold samples (loss 0.96→0.91). Merged LoRA adapters and uploaded to `s3://sridhar-models/student-1b-v2/`. Ready for canary deployment in Sprint 5.
 
 
 ---
@@ -140,6 +140,6 @@ QLoRA fine-tuning ran on-cluster (K8s Job with `rayproject/ray:2.38.0-py311-gpu`
 
 ---
 
-*Last updated: 2026-03-11 (Sprint 4 complete — fine-tuned model at s3://sridhar-models/student-1b-v2/)*
+*Last updated: 2026-03-12 (Sprint 4 complete — PyTorchJob via KFT, model at s3://sridhar-models/student-1b-v2/)*
 
 

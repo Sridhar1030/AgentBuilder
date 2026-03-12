@@ -1,0 +1,61 @@
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: student-finetune-v2
+  namespace: sridharproject
+spec:
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+          containers:
+            - name: pytorch
+              image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+              command:
+                - bash
+                - -c
+                - |
+                  pip install 'transformers>=4.45.0' 'peft>=0.13.0' 'trl>=0.11.0' \
+                    'datasets>=3.0.0' 'bitsandbytes>=0.43.0' 'accelerate>=0.34.0' 'boto3>=1.34.0' \
+                    && python /opt/scripts/finetune.py
+              env:
+                - name: HOME
+                  value: "/tmp"
+                - name: GOLD_DATA_PATH
+                  value: "s3://mlflow-artifacts/gold/train.jsonl"
+                - name: OUTPUT_MODEL_PATH
+                  value: "/tmp/student-merged"
+                - name: S3_OUTPUT_PATH
+                  value: "sridhar-models/student-1b-v2"
+                - name: PUSH_TO_S3
+                  value: "true"
+                - name: BASE_MODEL_ID
+                  value: "unsloth/Llama-3.2-1B-Instruct"
+                - name: AWS_ACCESS_KEY_ID
+                  value: "minioadmin"
+                - name: AWS_SECRET_ACCESS_KEY
+                  value: "minioadmin123"
+                - name: MLFLOW_S3_ENDPOINT_URL
+                  value: "http://minio.sridharproject.svc.cluster.local:9000"
+              volumeMounts:
+                - name: script
+                  mountPath: /opt/scripts
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: "16Gi"
+                  nvidia.com/gpu: "1"
+                limits:
+                  cpu: "8"
+                  memory: "24Gi"
+                  nvidia.com/gpu: "1"
+          volumes:
+            - name: script
+              configMap:
+                name: finetune-script

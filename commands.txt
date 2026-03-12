@@ -1,0 +1,4 @@
+to swap the old model to the new finetuned one 
+oc patch inferenceservice student-llm -n sridharproject --type='json' -p='[
+  {"op": "replace", "path": "/spec/predictor/model/storageUri", "value": "s3://sridhar-models/student-1b-v2/"}
+]'
