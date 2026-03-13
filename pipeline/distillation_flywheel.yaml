@@ -1,0 +1,688 @@
+# PIPELINE DEFINITION
+# Name: distillation-flywheel
+# Description: Extract teacher traces, fine-tune student, deploy, and evaluate.
+# Inputs:
+#    groq_api_key: str [Default: '']
+#    groq_model: str [Default: 'llama-3.3-70b-versatile']
+#    min_gold_threshold: int [Default: 0.0]
+#    model_version: str [Default: '']
+#    num_epochs: int [Default: 3.0]
+#    s3_access_key: str [Default: 'minioadmin']
+#    s3_secret_key: str [Default: 'minioadmin123']
+components:
+  comp-deploy-model:
+    executorLabel: exec-deploy-model
+    inputDefinitions:
+      parameters:
+        isvc_name:
+          parameterType: STRING
+        model_s3_path:
+          parameterType: STRING
+        namespace:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-evaluate:
+    executorLabel: exec-evaluate
+    inputDefinitions:
+      parameters:
+        groq_api_key:
+          parameterType: STRING
+        groq_model:
+          parameterType: STRING
+        student_url:
+          parameterType: STRING
+        test_questions:
+          parameterType: LIST
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRUCT
+  comp-extract-gold-data:
+    executorLabel: exec-extract-gold-data
+    inputDefinitions:
+      parameters:
+        experiment_name:
+          parameterType: STRING
+        min_threshold:
+          defaultValue: 0.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        mlflow_tracking_uri:
+          parameterType: STRING
+        output_s3_path:
+          parameterType: STRING
+        s3_access_key:
+          parameterType: STRING
+        s3_endpoint:
+          parameterType: STRING
+        s3_secret_key:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-finetune:
+    executorLabel: exec-finetune
+    inputDefinitions:
+      parameters:
+        base_model_id:
+          parameterType: STRING
+        batch_size:
+          defaultValue: 4.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        gold_data_path:
+          parameterType: STRING
+        learning_rate:
+          defaultValue: 0.0002
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+        lora_alpha:
+          defaultValue: 32.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        lora_r:
+          defaultValue: 16.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        model_output_s3_path:
+          parameterType: STRING
+        num_epochs:
+          defaultValue: 3.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        s3_access_key:
+          parameterType: STRING
+        s3_endpoint:
+          parameterType: STRING
+        s3_secret_key:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-resolve-version:
+    executorLabel: exec-resolve-version
+    inputDefinitions:
+      parameters:
+        explicit_version:
+          defaultValue: ''
+          isOptional: true
+          parameterType: STRING
+        gold_bucket:
+          parameterType: STRING
+        model_bucket:
+          parameterType: STRING
+        model_prefix:
+          parameterType: STRING
+        s3_access_key:
+          parameterType: STRING
+        s3_endpoint:
+          parameterType: STRING
+        s3_secret_key:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        gold_data_path:
+          parameterType: STRING
+        model_output_path:
+          parameterType: STRING
+        version:
+          parameterType: STRING
+deploymentSpec:
+  executors:
+    exec-deploy-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - deploy_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kubernetes==32.0.1'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef deploy_model(\n    model_s3_path: str,\n    isvc_name: str,\n\
+          \    namespace: str,\n) -> str:\n    \"\"\"Patch InferenceService storageUri\
+          \ and wait for Ready.\"\"\"\n    import time\n    from kubernetes import\
+          \ client, config\n\n    config.load_incluster_config()\n\n    custom_api\
+          \ = client.CustomObjectsApi()\n    group = \"serving.kserve.io\"\n    version\
+          \ = \"v1beta1\"\n    plural = \"inferenceservices\"\n\n    storage_uri =\
+          \ model_s3_path\n    if not storage_uri.startswith(\"s3://\"):\n       \
+          \ storage_uri = f\"s3://{storage_uri}\"\n    if not storage_uri.endswith(\"\
+          /\"):\n        storage_uri += \"/\"\n\n    patch_body = {\n        \"spec\"\
+          : {\n            \"predictor\": {\n                \"model\": {\n      \
+          \              \"storageUri\": storage_uri,\n                }\n       \
+          \     }\n        }\n    }\n\n    print(f\"Patching {isvc_name} storageUri\
+          \ -> {storage_uri}\")\n    custom_api.patch_namespaced_custom_object(\n\
+          \        group=group,\n        version=version,\n        namespace=namespace,\n\
+          \        plural=plural,\n        name=isvc_name,\n        body=patch_body,\n\
+          \    )\n\n    # Give the controller time to start the rollout before polling\n\
+          \    print(\"Waiting 30s for rollout to begin...\")\n    time.sleep(30)\n\
+          \n    # Wait for the ISVC to become Ready with the NEW storageUri (up to\
+          \ 10 min)\n    timeout = 600\n    poll_interval = 15\n    elapsed = 0\n\n\
+          \    while elapsed < timeout:\n        isvc = custom_api.get_namespaced_custom_object(\n\
+          \            group=group,\n            version=version,\n            namespace=namespace,\n\
+          \            plural=plural,\n            name=isvc_name,\n        )\n\n\
+          \        # Confirm the storageUri was actually updated\n        current_uri\
+          \ = (\n            isvc.get(\"spec\", {})\n            .get(\"predictor\"\
+          , {})\n            .get(\"model\", {})\n            .get(\"storageUri\"\
+          , \"\")\n        )\n        conditions = isvc.get(\"status\", {}).get(\"\
+          conditions\", [])\n        ready = any(\n            c.get(\"type\") ==\
+          \ \"Ready\" and c.get(\"status\") == \"True\"\n            for c in conditions\n\
+          \        )\n\n        if ready and current_uri == storage_uri:\n       \
+          \     url = isvc.get(\"status\", {}).get(\"url\", \"\")\n            print(f\"\
+          InferenceService {isvc_name} is Ready with new model: {url}\")\n       \
+          \     svc_url = f\"http://{isvc_name}-predictor.{namespace}.svc.cluster.local:8080\"\
+          \n\n            # Extra wait for vLLM to finish loading the model into GPU\
+          \ memory\n            print(\"Waiting 60s for vLLM to fully initialize...\"\
+          )\n            time.sleep(60)\n            return svc_url\n\n        status_msg\
+          \ = f\"ready={ready}, storageUri matches={current_uri == storage_uri}\"\n\
+          \        print(f\"Waiting for {isvc_name}... ({elapsed}s/{timeout}s) [{status_msg}]\"\
+          )\n        time.sleep(poll_interval)\n        elapsed += poll_interval\n\
+          \n    raise TimeoutError(\n        f\"InferenceService {isvc_name} did not\
+          \ become Ready within {timeout}s\"\n    )\n\n"
+        image: python:3.11-slim
+    exec-evaluate:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - evaluate
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'requests'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef evaluate(\n    student_url: str,\n    groq_api_key: str,\n  \
+          \  groq_model: str,\n    test_questions: list,\n) -> dict:\n    \"\"\"Send\
+          \ test questions to Student, have Teacher grade responses.\"\"\"\n    import\
+          \ json\n    import time\n    import requests\n\n    if not groq_api_key:\n\
+          \        raise ValueError(\n            \"groq_api_key is empty. Pass your\
+          \ Groq API key as a pipeline parameter.\"\n        )\n\n    print(f\"Student\
+          \ URL: {student_url}\")\n    print(f\"Groq model: {groq_model}\")\n    print(f\"\
+          Test questions: {len(test_questions)}\")\n    print(f\"Groq API key: set\
+          \ ({len(groq_api_key)} chars)\")\n\n    GRADING_PROMPT = (\n        \"You\
+          \ are an expert grader. Rate the following AI response to the given question\
+          \ \"\n        \"on a scale of 1 to 10, where 1 is completely wrong and 10\
+          \ is perfect. \"\n        'Respond with ONLY a JSON object: {\"score\":\
+          \ <number>, \"reason\": \"<brief reason>\"}'\n    )\n\n    def query_student(question:\
+          \ str, max_retries: int = 10) -> str:\n        for attempt in range(max_retries):\n\
+          \            try:\n                resp = requests.post(\n             \
+          \       f\"{student_url}/v1/chat/completions\",\n                    json={\n\
+          \                        \"model\": \"/mnt/models\",\n                 \
+          \       \"messages\": [{\"role\": \"user\", \"content\": question}],\n \
+          \                       \"max_tokens\": 256,\n                        \"\
+          temperature\": 0.3,\n                    },\n                    timeout=90,\n\
+          \                )\n                if resp.status_code in (404, 503):\n\
+          \                    wait = min(15 * (attempt + 1), 60)\n              \
+          \      print(f\"  [{attempt+1}/{max_retries}] HTTP {resp.status_code}, vLLM\
+          \ not ready. Retry in {wait}s\")\n                    time.sleep(wait)\n\
+          \                    continue\n                if not resp.ok:\n       \
+          \             print(f\"  HTTP {resp.status_code} from student: {resp.text[:500]}\"\
+          )\n                resp.raise_for_status()\n                return resp.json()[\"\
+          choices\"][0][\"message\"][\"content\"]\n            except (requests.ConnectionError,\
+          \ requests.Timeout) as e:\n                wait = min(15 * (attempt + 1),\
+          \ 60)\n                print(f\"  [{attempt+1}/{max_retries}] Connection\
+          \ error, retry in {wait}s: {e}\")\n                time.sleep(wait)\n  \
+          \      raise RuntimeError(f\"Student unreachable after {max_retries} retries\"\
+          )\n\n    def teacher_grade(question: str, answer: str) -> dict:\n      \
+          \  resp = requests.post(\n            \"https://api.groq.com/openai/v1/chat/completions\"\
+          ,\n            headers={\n                \"Authorization\": f\"Bearer {groq_api_key}\"\
+          ,\n                \"Content-Type\": \"application/json\",\n           \
+          \ },\n            json={\n                \"model\": groq_model,\n     \
+          \           \"messages\": [\n                    {\"role\": \"system\",\
+          \ \"content\": GRADING_PROMPT},\n                    {\n               \
+          \         \"role\": \"user\",\n                        \"content\": f\"\
+          Question: {question}\\n\\nStudent Response: {answer}\",\n              \
+          \      },\n                ],\n                \"max_tokens\": 200,\n  \
+          \              \"temperature\": 0.0,\n            },\n            timeout=30,\n\
+          \        )\n        resp.raise_for_status()\n        raw = resp.json()[\"\
+          choices\"][0][\"message\"][\"content\"]\n        try:\n            return\
+          \ json.loads(raw)\n        except json.JSONDecodeError:\n            return\
+          \ {\"score\": 0, \"reason\": f\"Failed to parse: {raw}\"}\n\n    print(\"\
+          \\n\" + \"=\" * 60)\n    results = []\n    for i, q in enumerate(test_questions):\n\
+          \        print(f\"\\n--- Question {i+1}/{len(test_questions)} ---\")\n \
+          \       print(f\"Q: {q}\")\n\n        student_answer = query_student(q)\n\
+          \        print(f\"\\nStudent:\\n{student_answer}\\n\")\n\n        grade\
+          \ = teacher_grade(q, student_answer)\n        print(f\"Teacher Grade: {grade['score']}/10\"\
+          )\n        print(f\"Reason: {grade.get('reason', 'N/A')}\")\n\n        results.append({\n\
+          \            \"question\": q,\n            \"student_answer\": student_answer,\n\
+          \            \"score\": grade[\"score\"],\n            \"reason\": grade.get(\"\
+          reason\", \"\"),\n        })\n\n    scores = [r[\"score\"] for r in results\
+          \ if isinstance(r.get(\"score\"), (int, float))]\n    avg_score = sum(scores)\
+          \ / len(scores) if scores else 0.0\n\n    print(\"\\n\" + \"=\" * 60)\n\
+          \    print(\"FINAL RESULTS\")\n    print(\"=\" * 60)\n    for i, r in enumerate(results):\n\
+          \        print(f\"  Q{i+1}: {r['score']}/10 -- {r.get('reason', '')}\")\n\
+          \    print(f\"\\n  Average Score: {avg_score:.2f}/10\")\n    print(\"=\"\
+          \ * 60)\n\n    return {\n        \"num_questions\": len(results),\n    \
+          \    \"avg_score\": round(avg_score, 2),\n        \"results\": results,\n\
+          \    }\n\n"
+        image: python:3.11-slim
+    exec-extract-gold-data:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - extract_gold_data
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'mlflow==3.10.0'\
+          \ 'boto3' 'pandas'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef extract_gold_data(\n    mlflow_tracking_uri: str,\n    s3_endpoint:\
+          \ str,\n    s3_access_key: str,\n    s3_secret_key: str,\n    experiment_name:\
+          \ str,\n    output_s3_path: str,\n    min_threshold: int = 0,\n) -> str:\n\
+          \    \"\"\"Extract teacher traces from MLflow, upload as JSONL to MinIO.\"\
+          \"\"\n    import json\n    import os\n    import mlflow\n\n    mlflow.set_tracking_uri(mlflow_tracking_uri)\n\
+          \    experiment = mlflow.get_experiment_by_name(experiment_name)\n    if\
+          \ not experiment:\n        raise RuntimeError(f\"Experiment '{experiment_name}'\
+          \ not found in MLflow\")\n\n    traces = mlflow.search_traces(\n       \
+          \ experiment_ids=[experiment.experiment_id],\n        max_results=1000,\n\
+          \    )\n\n    gold_pairs = []\n    for _, row in traces.iterrows():\n  \
+          \      req = row.get(\"request\")\n        resp = row.get(\"response\")\n\
+          \        if not req or not resp:\n            continue\n        if isinstance(req,\
+          \ str):\n            req = json.loads(req)\n\n        model_choice = req.get(\"\
+          model_choice\", \"\")\n        if \"70B\" not in model_choice and \"Teacher\"\
+          \ not in model_choice:\n            continue\n\n        question = req.get(\"\
+          message\", \"\")\n        answer = resp if isinstance(resp, str) else str(resp)\n\
+          \n        if question and answer:\n            gold_pairs.append({\n   \
+          \             \"instruction\": question,\n                \"output\": answer,\n\
+          \                \"text\": f\"### Instruction:\\n{question}\\n\\n### Response:\\\
+          n{answer}\",\n            })\n\n    print(f\"Found {len(gold_pairs)} gold\
+          \ teacher pairs out of {len(traces)} total traces.\")\n\n    if min_threshold\
+          \ and len(gold_pairs) < min_threshold:\n        raise RuntimeError(\n  \
+          \          f\"Only {len(gold_pairs)} pairs found, below threshold {min_threshold}\"\
+          \n        )\n\n    import boto3\n\n    parts = output_s3_path.replace(\"\
+          s3://\", \"\").split(\"/\", 1)\n    bucket, key = parts[0], parts[1]\n \
+          \   body = \"\\n\".join(json.dumps(p) for p in gold_pairs)\n\n    s3 = boto3.client(\n\
+          \        \"s3\",\n        endpoint_url=s3_endpoint,\n        aws_access_key_id=s3_access_key,\n\
+          \        aws_secret_access_key=s3_secret_key,\n    )\n    s3.put_object(Bucket=bucket,\
+          \ Key=key, Body=body.encode())\n    print(f\"Uploaded {len(gold_pairs)}\
+          \ pairs to {output_s3_path}\")\n\n    return output_s3_path\n\n"
+        image: python:3.11-slim
+    exec-finetune:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - finetune
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'peft==0.15.2'\
+          \ 'trl==0.17.0' 'bitsandbytes>=0.46.1' 'datasets==3.6.0' 'accelerate==1.6.0'\
+          \ 'boto3' 'sentencepiece' 'protobuf'  &&  python3 -m pip install --quiet\
+          \ --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5;\
+          \ python_version<\"3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef finetune(\n    gold_data_path: str,\n    model_output_s3_path:\
+          \ str,\n    base_model_id: str,\n    s3_endpoint: str,\n    s3_access_key:\
+          \ str,\n    s3_secret_key: str,\n    num_epochs: int = 3,\n    batch_size:\
+          \ int = 4,\n    learning_rate: float = 2e-4,\n    lora_r: int = 16,\n  \
+          \  lora_alpha: int = 32,\n) -> str:\n    \"\"\"Run QLoRA SFT on the student\
+          \ model using extracted gold data.\"\"\"\n    import json\n    import os\n\
+          \    import torch\n    import boto3\n    from datasets import Dataset\n\
+          \    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig\n\
+          \    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training\n\
+          \    from trl import SFTTrainer, SFTConfig\n\n    s3 = boto3.client(\n \
+          \       \"s3\",\n        endpoint_url=s3_endpoint,\n        aws_access_key_id=s3_access_key,\n\
+          \        aws_secret_access_key=s3_secret_key,\n    )\n\n    # --- Load gold\
+          \ data from S3 ---\n    parts = gold_data_path.replace(\"s3://\", \"\").split(\"\
+          /\", 1)\n    bucket, key = parts[0], parts[1]\n    obj = s3.get_object(Bucket=bucket,\
+          \ Key=key)\n    lines = obj[\"Body\"].read().decode().strip().split(\"\\\
+          n\")\n    records = [json.loads(line) for line in lines]\n    dataset =\
+          \ Dataset.from_list(records)\n    print(f\"Loaded {len(dataset)} training\
+          \ samples from {gold_data_path}\")\n\n    # --- Load base model with 4-bit\
+          \ quantization ---\n    print(f\"Loading base model: {base_model_id}\")\n\
+          \    bnb_config = BitsAndBytesConfig(\n        load_in_4bit=True,\n    \
+          \    bnb_4bit_quant_type=\"nf4\",\n        bnb_4bit_compute_dtype=torch.float16,\n\
+          \        bnb_4bit_use_double_quant=True,\n    )\n\n    tokenizer = AutoTokenizer.from_pretrained(base_model_id)\n\
+          \    tokenizer.pad_token = tokenizer.eos_token\n    tokenizer.model_max_length\
+          \ = 512\n\n    import os\n    os.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\
+          0\"\n\n    model = AutoModelForCausalLM.from_pretrained(\n        base_model_id,\n\
+          \        quantization_config=bnb_config,\n        device_map={\"\": 0},\n\
+          \    )\n    model = prepare_model_for_kbit_training(model)\n\n    # ---\
+          \ Apply LoRA ---\n    lora_config = LoraConfig(\n        r=lora_r,\n   \
+          \     lora_alpha=lora_alpha,\n        target_modules=[\"q_proj\", \"v_proj\"\
+          , \"k_proj\", \"o_proj\"],\n        lora_dropout=0.05,\n        bias=\"\
+          none\",\n        task_type=\"CAUSAL_LM\",\n    )\n    model = get_peft_model(model,\
+          \ lora_config)\n\n    # --- Train ---\n    training_args = SFTConfig(\n\
+          \        output_dir=\"/tmp/sft-checkpoints\",\n        num_train_epochs=num_epochs,\n\
+          \        per_device_train_batch_size=batch_size,\n        gradient_accumulation_steps=4,\n\
+          \        learning_rate=learning_rate,\n        fp16=False,\n        logging_steps=1,\n\
+          \        save_strategy=\"epoch\",\n        warmup_ratio=0.1,\n    )\n\n\
+          \    trainer = SFTTrainer(\n        model=model,\n        args=training_args,\n\
+          \        train_dataset=dataset,\n        processing_class=tokenizer,\n \
+          \   )\n\n    print(\"Starting QLoRA fine-tuning...\")\n    trainer.train()\n\
+          \n    # --- Save LoRA adapter, then merge in full precision ---\n    adapter_dir\
+          \ = \"/tmp/lora-adapter\"\n    output_dir = \"/tmp/student-merged\"\n  \
+          \  print(\"Saving LoRA adapter...\")\n    model.save_pretrained(adapter_dir)\n\
+          \n    print(f\"Reloading base model in full precision for merge: {base_model_id}\"\
+          )\n    del model\n    torch.cuda.empty_cache()\n\n    from peft import PeftModel\n\
+          \    base_model = AutoModelForCausalLM.from_pretrained(\n        base_model_id,\n\
+          \        torch_dtype=torch.float16,\n        device_map={\"\": 0},\n   \
+          \ )\n    peft_model = PeftModel.from_pretrained(base_model, adapter_dir)\n\
+          \    merged_model = peft_model.merge_and_unload()\n    print(\"LoRA merged\
+          \ into full-precision model\")\n    merged_model.save_pretrained(output_dir)\n\
+          \n    # Save tokenizer then strip fields that break older vLLM/transformers.\n\
+          \    clean_tokenizer = AutoTokenizer.from_pretrained(base_model_id)\n  \
+          \  clean_tokenizer.save_pretrained(output_dir)\n\n    import json as _json\n\
+          \    tc_path = os.path.join(output_dir, \"tokenizer_config.json\")\n   \
+          \ with open(tc_path, \"r\") as f:\n        tc = _json.load(f)\n    removed\
+          \ = []\n    for key in [\"tokenizer_class\", \"auto_map\"]:\n        if\
+          \ key in tc:\n            removed.append(f\"{key}={tc.pop(key)}\")\n   \
+          \ if removed:\n        with open(tc_path, \"w\") as f:\n            _json.dump(tc,\
+          \ f, indent=2)\n        print(f\"Patched tokenizer_config.json: removed\
+          \ {removed}\")\n\n    dest_parts = model_output_s3_path.replace(\"s3://\"\
+          , \"\").split(\"/\", 1)\n    dest_bucket, dest_prefix = dest_parts[0], dest_parts[1]\n\
+          \n    for root, _, files in os.walk(output_dir):\n        for fname in files:\n\
+          \            local_path = os.path.join(root, fname)\n            s3_key\
+          \ = os.path.join(dest_prefix, os.path.relpath(local_path, output_dir))\n\
+          \            print(f\"Uploading {fname} -> s3://{dest_bucket}/{s3_key}\"\
+          )\n            s3.upload_file(local_path, dest_bucket, s3_key)\n\n    print(f\"\
+          Model uploaded to {model_output_s3_path}\")\n    return model_output_s3_path\n\
+          \n"
+        image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+        resources:
+          accelerator:
+            count: '1'
+            resourceCount: '1'
+          cpuLimit: 8.0
+          cpuRequest: 4.0
+          memoryLimit: 25.769803776
+          memoryRequest: 17.179869184
+          resourceCpuLimit: '8'
+          resourceCpuRequest: '4'
+          resourceMemoryLimit: 24Gi
+          resourceMemoryRequest: 16Gi
+    exec-resolve-version:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - resolve_version
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'boto3'  && \
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef resolve_version(\n    s3_endpoint: str,\n    s3_access_key: str,\n\
+          \    s3_secret_key: str,\n    model_bucket: str,\n    model_prefix: str,\n\
+          \    gold_bucket: str,\n    explicit_version: str = \"\",\n) -> NamedTuple(\"\
+          VersionOutputs\", [(\"version\", str), (\"gold_data_path\", str), (\"model_output_path\"\
+          , str)]):\n    \"\"\"Find the latest student-1b-vN/ in MinIO and return\
+          \ vN+1 with paths.\"\"\"\n    import re\n    from collections import namedtuple\n\
+          \    import boto3\n\n    s3 = boto3.client(\n        \"s3\",\n        endpoint_url=s3_endpoint,\n\
+          \        aws_access_key_id=s3_access_key,\n        aws_secret_access_key=s3_secret_key,\n\
+          \    )\n\n    if explicit_version:\n        version = explicit_version\n\
+          \        print(f\"Using explicit version: {version}\")\n    else:\n    \
+          \    paginator = s3.get_paginator(\"list_objects_v2\")\n        version_numbers\
+          \ = []\n\n        for page in paginator.paginate(Bucket=model_bucket, Prefix=model_prefix,\
+          \ Delimiter=\"/\"):\n            for cp in page.get(\"CommonPrefixes\",\
+          \ []):\n                folder = cp[\"Prefix\"]\n                match =\
+          \ re.search(r\"-v(\\d+)/?$\", folder)\n                if match:\n     \
+          \               version_numbers.append(int(match.group(1)))\n\n        if\
+          \ version_numbers:\n            latest = max(version_numbers)\n        \
+          \    version = f\"v{latest + 1}\"\n            print(f\"Found versions:\
+          \ {sorted(version_numbers)}. Latest: v{latest}. Next: {version}\")\n   \
+          \     else:\n            version = \"v1\"\n            print(f\"No existing\
+          \ versions found under {model_bucket}/{model_prefix}. Starting at {version}\"\
+          )\n\n    gold_data_path = f\"s3://{gold_bucket}/gold/train-{version}.jsonl\"\
+          \n    model_output_path = f\"s3://{model_bucket}/{model_prefix}{version}/\"\
+          \n\n    print(f\"Version: {version}\")\n    print(f\"Gold data path: {gold_data_path}\"\
+          )\n    print(f\"Model output path: {model_output_path}\")\n\n    Outputs\
+          \ = namedtuple(\"VersionOutputs\", [\"version\", \"gold_data_path\", \"\
+          model_output_path\"])\n    return Outputs(version=version, gold_data_path=gold_data_path,\
+          \ model_output_path=model_output_path)\n\n"
+        image: python:3.11-slim
+pipelineInfo:
+  description: Extract teacher traces, fine-tune student, deploy, and evaluate.
+  name: distillation-flywheel
+root:
+  dag:
+    tasks:
+      deploy-model:
+        cachingOptions: {}
+        componentRef:
+          name: comp-deploy-model
+        dependentTasks:
+        - finetune
+        inputs:
+          parameters:
+            isvc_name:
+              runtimeValue:
+                constant: student-llm
+            model_s3_path:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: finetune
+            namespace:
+              runtimeValue:
+                constant: sridharproject
+        taskInfo:
+          name: deploy-model
+      evaluate:
+        cachingOptions: {}
+        componentRef:
+          name: comp-evaluate
+        dependentTasks:
+        - deploy-model
+        inputs:
+          parameters:
+            groq_api_key:
+              componentInputParameter: groq_api_key
+            groq_model:
+              componentInputParameter: groq_model
+            student_url:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: deploy-model
+            test_questions:
+              runtimeValue:
+                constant:
+                - What is knowledge distillation and why is it useful?
+                - Explain the difference between LoRA and full fine-tuning.
+                - How does QLoRA reduce memory usage during training?
+                - What are the advantages of smaller language models in production?
+                - Describe the role of a teacher model in model compression.
+        taskInfo:
+          name: evaluate
+      extract-gold-data:
+        cachingOptions: {}
+        componentRef:
+          name: comp-extract-gold-data
+        dependentTasks:
+        - resolve-version
+        inputs:
+          parameters:
+            experiment_name:
+              runtimeValue:
+                constant: Distillation-Eval-Hub
+            min_threshold:
+              componentInputParameter: min_gold_threshold
+            mlflow_tracking_uri:
+              runtimeValue:
+                constant: http://mlflow.sridharproject.svc.cluster.local:5000
+            output_s3_path:
+              taskOutputParameter:
+                outputParameterKey: gold_data_path
+                producerTask: resolve-version
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_endpoint:
+              runtimeValue:
+                constant: http://minio.sridharproject.svc.cluster.local:9000
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+        taskInfo:
+          name: extract-gold-data
+      finetune:
+        cachingOptions: {}
+        componentRef:
+          name: comp-finetune
+        dependentTasks:
+        - extract-gold-data
+        - resolve-version
+        inputs:
+          parameters:
+            base_model_id:
+              runtimeValue:
+                constant: unsloth/Llama-3.2-1B-Instruct
+            gold_data_path:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: extract-gold-data
+            model_output_s3_path:
+              taskOutputParameter:
+                outputParameterKey: model_output_path
+                producerTask: resolve-version
+            num_epochs:
+              componentInputParameter: num_epochs
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_endpoint:
+              runtimeValue:
+                constant: http://minio.sridharproject.svc.cluster.local:9000
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+        taskInfo:
+          name: finetune
+      resolve-version:
+        cachingOptions: {}
+        componentRef:
+          name: comp-resolve-version
+        inputs:
+          parameters:
+            explicit_version:
+              componentInputParameter: model_version
+            gold_bucket:
+              runtimeValue:
+                constant: mlflow-artifacts
+            model_bucket:
+              runtimeValue:
+                constant: sridhar-models
+            model_prefix:
+              runtimeValue:
+                constant: student-1b-
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_endpoint:
+              runtimeValue:
+                constant: http://minio.sridharproject.svc.cluster.local:9000
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+        taskInfo:
+          name: resolve-version
+  inputDefinitions:
+    parameters:
+      groq_api_key:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      groq_model:
+        defaultValue: llama-3.3-70b-versatile
+        isOptional: true
+        parameterType: STRING
+      min_gold_threshold:
+        defaultValue: 0.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      model_version:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      num_epochs:
+        defaultValue: 3.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      s3_access_key:
+        defaultValue: minioadmin
+        isOptional: true
+        parameterType: STRING
+      s3_secret_key:
+        defaultValue: minioadmin123
+        isOptional: true
+        parameterType: STRING
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.16.0

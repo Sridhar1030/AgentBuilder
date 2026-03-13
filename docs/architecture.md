@@ -10,7 +10,7 @@
 flowchart LR
     Teacher["70B Teacher\n(Groq API)"] -->|Q&A pairs| MLflow["MLflow\n(Trace Store)"]
     MLflow -->|gold_extractor.py| Gold["Gold Dataset\n(MinIO)"]
-    Gold -->|train.jsonl| Finetune["QLoRA Fine-Tune\n(K8s Job + T4 GPU)"]
+    Gold -->|train.jsonl| Finetune["QLoRA Fine-Tune\n(KFP Step + T4 GPU)"]
     Finetune -->|merged model| MinIO["MinIO\n(S3 Storage)"]
     MinIO -->|model weights| KServe["KServe + vLLM\n(Student Serving)"]
     KServe -->|inference| Gradio["Gradio UI\n(Local)"]
@@ -29,9 +29,10 @@ flowchart TB
             MLflow["MLflow Server\n+ PVC"]
             MinIO["MinIO\n+ 20Gi PVC"]
             Job["Fine-Tune Job\n(1x T4 GPU)"]
+            KFP["KFP Pipeline Server\n+ MariaDB"]
         end
         subgraph ops["redhat-ods-applications"]
-            KubeRay["KubeRay Operator"]
+            DSP["DSP Operator"]
             Serverless["OpenShift Serverless"]
             RHOAI["RHOAI 3.2.0"]
         end
@@ -47,6 +48,8 @@ flowchart TB
     Extract -- "HTTP" --> MLflow
     Extract -- "port-forward :9000" --> MinIO
     Job -- "in-cluster" --> MinIO
+    KFP -- "orchestrates" --> Job
+    KFP -- "artifacts" --> MinIO
 ```
 
 ---
@@ -95,9 +98,11 @@ sridhar-models/
 
 mlflow-artifacts/
 ├── gold/
-│   └── train.jsonl           # 10 teacher Q&A pairs
-└── 1/
-    └── traces/               # MLflow experiment traces
+│   ├── train.jsonl           # 10 teacher Q&A pairs
+│   └── train-v3.jsonl        # Versioned gold data (KFP pipeline)
+├── 1/
+│   └── traces/               # MLflow experiment traces
+└── pipeline/                 # KFP pipeline artifacts (managed by DSP)
 ```
 
 ---
@@ -130,17 +135,27 @@ AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin123 \
   python gold_extractor.py
 ```
 
-**Run fine-tuning on cluster:**
+**Run fine-tuning on cluster (standalone PyTorchJob):**
 
 ```bash
-# Update the script ConfigMap and submit the job
 oc delete configmap finetune-script -n sridharproject
 oc create configmap finetune-script --from-file=finetune.py -n sridharproject
-oc apply -f rhoai/04-rayjob-finetune.yaml
+oc apply -f rhoai/04-pytorchjob-finetune.yaml
+```
 
-# Monitor
-oc logs -f $(oc get pods -n sridharproject -l job-name=student-finetune-v2 \
-  -o jsonpath='{.items[0].metadata.name}') -n sridharproject
+**Run the full KFP distillation pipeline:**
+
+```bash
+# Compile pipeline
+cd pipeline && source ../venv311/bin/activate
+python pipeline.py   # → distillation_flywheel.yaml
+
+# Upload via RHOAI dashboard or kfp.Client()
+python -c "
+from kfp import client
+c = client.Client(host='https://ds-pipeline-dspa-sridharproject.apps.sridhartest-pool-7f6n4.aws.rh-ods.com')
+c.upload_pipeline('distillation_flywheel.yaml', pipeline_name='distillation-flywheel')
+"
 ```
 
 **Check cluster health:**
@@ -159,7 +174,8 @@ oc get routes -n sridharproject
 |---|---|---|
 | Teacher LLM | Llama-3.3-70B via Groq API | Cloud (Groq) |
 | Student LLM | Llama-3.2-1B-Instruct | KServe + vLLM on OpenShift |
-| Fine-Tuning | QLoRA + SFTTrainer (trl) | K8s Job with T4 GPU |
+| Fine-Tuning | QLoRA + SFTTrainer (trl) | KFP Pipeline / PyTorchJob with T4 GPU |
+| Pipelines | KFP 2.16 + RHOAI DSP | Pipeline server in sridharproject |
 | Tracking | MLflow 3.10 | Pod in sridharproject |
 | Storage | MinIO (S3-compatible) | Pod in sridharproject |
 | UI | Gradio 6.x | Local (developer machine) |

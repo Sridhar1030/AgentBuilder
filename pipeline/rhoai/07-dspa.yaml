@@ -1,0 +1,28 @@
+apiVersion: datasciencepipelinesapplications.opendatahub.io/v1
+kind: DataSciencePipelinesApplication
+metadata:
+  name: dspa
+  namespace: sridharproject
+spec:
+  apiServer:
+    deploy: true
+    enableSamplePipeline: false
+  persistenceAgent:
+    deploy: true
+  scheduledWorkflow:
+    deploy: true
+  database:
+    mariaDB:
+      deploy: true
+      pipelineDBName: mlpipeline
+      pvcSize: 10Gi
+  objectStorage:
+    externalStorage:
+      bucket: mlflow-artifacts
+      host: minio.sridharproject.svc.cluster.local
+      port: "9000"
+      scheme: http
+      s3CredentialsSecret:
+        accessKey: AWS_ACCESS_KEY_ID
+        secretKey: AWS_SECRET_ACCESS_KEY
+        secretName: mlflow-minio-creds
