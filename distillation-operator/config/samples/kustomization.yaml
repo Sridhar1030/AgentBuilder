@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- distillation_v1alpha1_distillationjob.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

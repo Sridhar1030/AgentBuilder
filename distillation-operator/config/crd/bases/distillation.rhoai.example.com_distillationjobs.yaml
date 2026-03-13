@@ -1,0 +1,107 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: distillationjobs.distillation.rhoai.example.com
+spec:
+  group: distillation.rhoai.example.com
+  names:
+    kind: DistillationJob
+    listKind: DistillationJobList
+    plural: distillationjobs
+    singular: distillationjob
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.pipelineRunID
+      name: RunID
+      type: string
+    - jsonPath: .status.modelVersion
+      name: Model
+      type: string
+    - jsonPath: .status.avgScore
+      name: Score
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: DistillationJob is the Schema for the distillationjobs API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DistillationJobSpec defines the desired state of a distillation
+              pipeline run.
+            properties:
+              epochs:
+                default: 3
+                minimum: 1
+                type: integer
+              groqApiKeySecret:
+                type: string
+              groqModel:
+                default: llama-3.3-70b-versatile
+                type: string
+              minGoldThreshold:
+                default: 0
+                type: integer
+              modelVersion:
+                type: string
+              pipelineName:
+                default: distillation-flywheel
+                type: string
+            required:
+            - groqApiKeySecret
+            type: object
+          status:
+            description: DistillationJobStatus defines the observed state of a distillation
+              pipeline run.
+            properties:
+              avgScore:
+                type: string
+              lastUpdated:
+                format: date-time
+                type: string
+              message:
+                type: string
+              modelVersion:
+                type: string
+              phase:
+                enum:
+                - Pending
+                - Submitting
+                - Running
+                - Succeeded
+                - Failed
+                type: string
+              pipelineRunID:
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,13 @@
+apiVersion: distillation.rhoai.example.com/v1alpha1
+kind: DistillationJob
+metadata:
+  labels:
+    app.kubernetes.io/name: distillation-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: test-run
+  namespace: sridharproject
+spec:
+  groqApiKeySecret: groq-api-key
+  epochs: 3
+  groqModel: "llama-3.3-70b-versatile"
+  pipelineName: "DistillationFlywheel_3"
