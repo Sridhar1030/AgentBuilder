@@ -10,4 +10,4 @@ spec:
   groqApiKeySecret: groq-api-key
   epochs: 3
   groqModel: "llama-3.3-70b-versatile"
-  pipelineName: "DistillationFlywheel_3"
+  pipelineName: "DistillationFlywheel_5"

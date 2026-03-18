@@ -83,11 +83,8 @@ def distillation_pipeline(
         num_epochs=num_epochs,
     )
     finetune_task.set_caching_options(False)
-    finetune_task.set_gpu_limit(1)
-    finetune_task.set_memory_request("16Gi")
-    finetune_task.set_memory_limit("24Gi")
-    finetune_task.set_cpu_request("4")
-    finetune_task.set_cpu_limit("8")
+    # GPU/memory limits removed — resources are now set on the TrainJob pod spec,
+    # not the KFP orchestration pod.
 
     # Step 3 — Deploy Model (patch ISVC)
     deploy_task = deploy_model(

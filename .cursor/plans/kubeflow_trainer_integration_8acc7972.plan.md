@@ -4,28 +4,28 @@ overview: Replace the in-process GPU training in the KFP finetune component with
 todos:
   - id: training-image
     content: Create pipeline/training/Dockerfile and finetune_job.py (standalone training script reading env vars)
-    status: in_progress
+    status: completed
   - id: build-push
     content: Build and push distillation-trainer:v0.1.0 image for linux/amd64
-    status: pending
+    status: in_progress
   - id: rewrite-component
     content: Rewrite pipeline/components/finetune.py to submit TrainJob CR and poll for completion
-    status: pending
+    status: completed
   - id: rbac
     content: Create and apply pipeline/training/rbac.yaml for pipeline-runner-dspa SA
-    status: pending
+    status: completed
   - id: update-pipeline
     content: Update pipeline/pipeline.py to remove GPU/memory limits from finetune_task
-    status: pending
+    status: completed
   - id: compile-upload
     content: Recompile pipeline YAML and upload to RHOAI as DistillationFlywheel_4
-    status: pending
+    status: completed
   - id: update-operator-sample
     content: Update operator sample CR pipelineName to DistillationFlywheel_4
-    status: pending
+    status: completed
   - id: test-e2e
     content: "Test end-to-end: apply DistillationJob CR and verify TrainJob gets created"
-    status: pending
+    status: completed
 isProject: false
 ---
 
