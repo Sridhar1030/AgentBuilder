@@ -2,7 +2,7 @@
 KFP Component 4 -- Evaluate
 
 Sends test questions to the Student model one by one, has the 70B Teacher
-grade each response, and prints clear per-question results.
+grade each response, logs metrics to MLflow, and prints clear per-question results.
 """
 
 from kfp import dsl
@@ -10,18 +10,37 @@ from kfp import dsl
 
 @dsl.component(
     base_image="python:3.11-slim",
-    packages_to_install=["requests"],
+    packages_to_install=["requests", "mlflow", "boto3"],
 )
 def evaluate(
     student_url: str,
     groq_api_key: str,
     groq_model: str,
     test_questions: list,
+    mlflow_tracking_uri: str = "",
+    model_version: str = "unknown",
+    s3_endpoint: str = "",
+    s3_access_key: str = "",
+    s3_secret_key: str = "",
 ) -> dict:
-    """Send test questions to Student, have Teacher grade responses."""
+    """Send test questions to Student, have Teacher grade responses, log to MLflow."""
     import json
+    import os
     import time
     import requests
+    import mlflow
+
+    if mlflow_tracking_uri.startswith("https://"):
+        os.environ.setdefault("MLFLOW_TRACKING_INSECURE_TLS", "true")
+
+    if s3_endpoint:
+        os.environ.setdefault("MLFLOW_S3_ENDPOINT_URL", s3_endpoint)
+        if s3_endpoint.startswith("https://"):
+            os.environ.setdefault("MLFLOW_S3_IGNORE_TLS", "true")
+    if s3_access_key:
+        os.environ.setdefault("AWS_ACCESS_KEY_ID", s3_access_key)
+    if s3_secret_key:
+        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", s3_secret_key)
 
     if not groq_api_key:
         raise ValueError(
@@ -67,6 +86,27 @@ def evaluate(
                 time.sleep(wait)
         raise RuntimeError(f"Student unreachable after {max_retries} retries")
 
+    def query_teacher(question: str) -> str:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {groq_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": groq_model,
+                "messages": [
+                    {"role": "system", "content": "You are a helpful and concise assistant."},
+                    {"role": "user", "content": question},
+                ],
+                "max_tokens": 512,
+                "temperature": 0.7,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
     def teacher_grade(question: str, answer: str) -> dict:
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -111,23 +151,60 @@ def evaluate(
         results.append({
             "question": q,
             "student_answer": student_answer,
-            "score": grade["score"],
+            "student_score": grade["score"],
             "reason": grade.get("reason", ""),
         })
 
-    scores = [r["score"] for r in results if isinstance(r.get("score"), (int, float))]
-    avg_score = sum(scores) / len(scores) if scores else 0.0
+    student_scores = [r["student_score"] for r in results if isinstance(r.get("student_score"), (int, float))]
+    student_avg = sum(student_scores) / len(student_scores) if student_scores else 0.0
+
+    # Teacher baseline — same questions, Teacher answers, then self-grade
+    print("\n" + "=" * 60)
+    print("TEACHER BASELINE")
+    print("=" * 60)
+    for i, r in enumerate(results):
+        q = r["question"]
+        teacher_answer = query_teacher(q)
+        teacher_grade_result = teacher_grade(q, teacher_answer)
+        r["teacher_answer"] = teacher_answer
+        r["teacher_score"] = teacher_grade_result["score"]
+        print(f"  Q{i+1}: {teacher_grade_result['score']}/10")
+
+    teacher_scores = [r["teacher_score"] for r in results if isinstance(r.get("teacher_score"), (int, float))]
+    teacher_avg = sum(teacher_scores) / len(teacher_scores) if teacher_scores else 0.0
 
     print("\n" + "=" * 60)
     print("FINAL RESULTS")
     print("=" * 60)
     for i, r in enumerate(results):
-        print(f"  Q{i+1}: {r['score']}/10 -- {r.get('reason', '')}")
-    print(f"\n  Average Score: {avg_score:.2f}/10")
+        print(f"  Q{i+1}: student={r['student_score']}/10  teacher={r['teacher_score']}/10 -- {r.get('reason', '')}")
+    print(f"\n  Student Avg: {student_avg:.2f}/10")
+    print(f"  Teacher Avg: {teacher_avg:.2f}/10")
+    print(f"  Score Gap:   {teacher_avg - student_avg:.2f}")
     print("=" * 60)
+
+    # Log to MLflow
+    if mlflow_tracking_uri:
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+        mlflow.set_experiment("Distillation-Eval-Hub")
+        with mlflow.start_run(run_name=f"pipeline-eval-{model_version}"):
+            mlflow.set_tag("model_version", model_version)
+            mlflow.set_tag("eval_type", "pipeline_benchmark")
+            mlflow.log_metric("student_avg_score", round(student_avg, 4))
+            mlflow.log_metric("teacher_avg_score", round(teacher_avg, 4))
+            mlflow.log_metric("score_gap", round(teacher_avg - student_avg, 4))
+            for i, r in enumerate(results):
+                mlflow.log_metric(f"q{i+1}_student_score", r["student_score"])
+                mlflow.log_metric(f"q{i+1}_teacher_score", r["teacher_score"])
+            mlflow.log_dict({"results": results}, "eval_results.json")
+        print(f"MLflow run logged to {mlflow_tracking_uri}")
+    else:
+        print("mlflow_tracking_uri not set — skipping MLflow logging")
 
     return {
         "num_questions": len(results),
-        "avg_score": round(avg_score, 2),
+        "student_avg_score": round(student_avg, 2),
+        "teacher_avg_score": round(teacher_avg, 2),
+        "score_gap": round(teacher_avg - student_avg, 2),
         "results": results,
     }

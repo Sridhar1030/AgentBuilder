@@ -1,7 +1,7 @@
 """
 KFP Pipeline — Distillation Flywheel
 
-Orchestrates the full loop: extract gold data from MLflow traces,
+Orchestrates the full loop: extract gold data from MinIO (teacher + synthetic),
 fine-tune the 1B student with QLoRA, deploy via KServe, and evaluate.
 
 Compile:
@@ -26,6 +26,12 @@ MLFLOW_URI = "http://mlflow.sridharproject.svc.cluster.local:5000"
 ISVC_NAME = "student-llm"
 BASE_MODEL_ID = "unsloth/Llama-3.2-1B-Instruct"
 
+TEACHER_BUCKET = "mlflow-artifacts"
+TEACHER_PREFIX = "teacher-interactions/"
+SYNTHETIC_BUCKET = "mlflow-artifacts"
+SYNTHETIC_PREFIX = "synthetic/"
+CURSOR_KEY = "teacher-interactions/.cursor.json"
+
 TEST_QUESTIONS = [
     "What is knowledge distillation and why is it useful?",
     "Explain the difference between LoRA and full fine-tuning.",
@@ -37,7 +43,7 @@ TEST_QUESTIONS = [
 
 @dsl.pipeline(
     name="distillation-flywheel",
-    description="Extract teacher traces, fine-tune student, deploy, and evaluate.",
+    description="Extract teacher + synthetic gold, fine-tune student, deploy, and evaluate.",
 )
 def distillation_pipeline(
     model_version: str = "",
@@ -55,18 +61,21 @@ def distillation_pipeline(
         s3_secret_key=s3_secret_key,
         model_bucket="sridhar-models",
         model_prefix="student-1b-",
-        gold_bucket="mlflow-artifacts",
+        gold_bucket=TEACHER_BUCKET,
         explicit_version=model_version,
     )
     version_task.set_caching_options(False)
 
-    # Step 1 — Extract Gold Data
+    # Step 1 — Extract Gold Data (teacher from MinIO incremental + synthetic)
     extract_task = extract_gold_data(
-        mlflow_tracking_uri=MLFLOW_URI,
         s3_endpoint=S3_ENDPOINT,
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,
-        experiment_name="Distillation-Eval-Hub",
+        teacher_bucket=TEACHER_BUCKET,
+        teacher_prefix=TEACHER_PREFIX,
+        synthetic_bucket=SYNTHETIC_BUCKET,
+        synthetic_prefix=SYNTHETIC_PREFIX,
+        cursor_key=CURSOR_KEY,
         output_s3_path=version_task.outputs["gold_data_path"],
         min_threshold=min_gold_threshold,
     )
@@ -100,6 +109,11 @@ def distillation_pipeline(
         groq_api_key=groq_api_key,
         groq_model=groq_model,
         test_questions=TEST_QUESTIONS,
+        mlflow_tracking_uri=MLFLOW_URI,
+        model_version=version_task.outputs["version"],
+        s3_endpoint=S3_ENDPOINT,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
     )
     eval_task.set_caching_options(False)
 

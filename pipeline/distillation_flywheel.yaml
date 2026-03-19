@@ -1,6 +1,6 @@
 # PIPELINE DEFINITION
 # Name: distillation-flywheel
-# Description: Extract teacher traces, fine-tune student, deploy, and evaluate.
+# Description: Extract teacher + synthetic gold, fine-tune student, deploy, and evaluate.
 # Inputs:
 #    groq_api_key: str [Default: '']
 #    groq_model: str [Default: 'llama-3.3-70b-versatile']
@@ -32,6 +32,26 @@ components:
           parameterType: STRING
         groq_model:
           parameterType: STRING
+        mlflow_tracking_uri:
+          defaultValue: ''
+          isOptional: true
+          parameterType: STRING
+        model_version:
+          defaultValue: unknown
+          isOptional: true
+          parameterType: STRING
+        s3_access_key:
+          defaultValue: ''
+          isOptional: true
+          parameterType: STRING
+        s3_endpoint:
+          defaultValue: ''
+          isOptional: true
+          parameterType: STRING
+        s3_secret_key:
+          defaultValue: ''
+          isOptional: true
+          parameterType: STRING
         student_url:
           parameterType: STRING
         test_questions:
@@ -44,14 +64,12 @@ components:
     executorLabel: exec-extract-gold-data
     inputDefinitions:
       parameters:
-        experiment_name:
+        cursor_key:
           parameterType: STRING
         min_threshold:
           defaultValue: 0.0
           isOptional: true
           parameterType: NUMBER_INTEGER
-        mlflow_tracking_uri:
-          parameterType: STRING
         output_s3_path:
           parameterType: STRING
         s3_access_key:
@@ -59,6 +77,14 @@ components:
         s3_endpoint:
           parameterType: STRING
         s3_secret_key:
+          parameterType: STRING
+        synthetic_bucket:
+          parameterType: STRING
+        synthetic_prefix:
+          parameterType: STRING
+        teacher_bucket:
+          parameterType: STRING
+        teacher_prefix:
           parameterType: STRING
     outputDefinitions:
       parameters:
@@ -214,10 +240,10 @@ deploymentSpec:
         - -c
         - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
           \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
-          \ python3 -m pip install --quiet --no-warn-script-location 'requests'  &&\
-          \  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
-          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
-          $0\" \"$@\"\n"
+          \ python3 -m pip install --quiet --no-warn-script-location 'requests' 'mlflow'\
+          \ 'boto3'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -230,21 +256,31 @@ deploymentSpec:
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef evaluate(\n    student_url: str,\n    groq_api_key: str,\n  \
-          \  groq_model: str,\n    test_questions: list,\n) -> dict:\n    \"\"\"Send\
-          \ test questions to Student, have Teacher grade responses.\"\"\"\n    import\
-          \ json\n    import time\n    import requests\n\n    if not groq_api_key:\n\
-          \        raise ValueError(\n            \"groq_api_key is empty. Pass your\
-          \ Groq API key as a pipeline parameter.\"\n        )\n\n    print(f\"Student\
-          \ URL: {student_url}\")\n    print(f\"Groq model: {groq_model}\")\n    print(f\"\
-          Test questions: {len(test_questions)}\")\n    print(f\"Groq API key: set\
-          \ ({len(groq_api_key)} chars)\")\n\n    GRADING_PROMPT = (\n        \"You\
-          \ are an expert grader. Rate the following AI response to the given question\
-          \ \"\n        \"on a scale of 1 to 10, where 1 is completely wrong and 10\
-          \ is perfect. \"\n        'Respond with ONLY a JSON object: {\"score\":\
-          \ <number>, \"reason\": \"<brief reason>\"}'\n    )\n\n    def query_student(question:\
-          \ str, max_retries: int = 10) -> str:\n        for attempt in range(max_retries):\n\
-          \            try:\n                resp = requests.post(\n             \
-          \       f\"{student_url}/v1/chat/completions\",\n                    json={\n\
+          \  groq_model: str,\n    test_questions: list,\n    mlflow_tracking_uri:\
+          \ str = \"\",\n    model_version: str = \"unknown\",\n    s3_endpoint: str\
+          \ = \"\",\n    s3_access_key: str = \"\",\n    s3_secret_key: str = \"\"\
+          ,\n) -> dict:\n    \"\"\"Send test questions to Student, have Teacher grade\
+          \ responses, log to MLflow.\"\"\"\n    import json\n    import os\n    import\
+          \ time\n    import requests\n    import mlflow\n\n    if mlflow_tracking_uri.startswith(\"\
+          https://\"):\n        os.environ.setdefault(\"MLFLOW_TRACKING_INSECURE_TLS\"\
+          , \"true\")\n\n    if s3_endpoint:\n        os.environ.setdefault(\"MLFLOW_S3_ENDPOINT_URL\"\
+          , s3_endpoint)\n        if s3_endpoint.startswith(\"https://\"):\n     \
+          \       os.environ.setdefault(\"MLFLOW_S3_IGNORE_TLS\", \"true\")\n    if\
+          \ s3_access_key:\n        os.environ.setdefault(\"AWS_ACCESS_KEY_ID\", s3_access_key)\n\
+          \    if s3_secret_key:\n        os.environ.setdefault(\"AWS_SECRET_ACCESS_KEY\"\
+          , s3_secret_key)\n\n    if not groq_api_key:\n        raise ValueError(\n\
+          \            \"groq_api_key is empty. Pass your Groq API key as a pipeline\
+          \ parameter.\"\n        )\n\n    print(f\"Student URL: {student_url}\")\n\
+          \    print(f\"Groq model: {groq_model}\")\n    print(f\"Test questions:\
+          \ {len(test_questions)}\")\n    print(f\"Groq API key: set ({len(groq_api_key)}\
+          \ chars)\")\n\n    GRADING_PROMPT = (\n        \"You are an expert grader.\
+          \ Rate the following AI response to the given question \"\n        \"on\
+          \ a scale of 1 to 10, where 1 is completely wrong and 10 is perfect. \"\n\
+          \        'Respond with ONLY a JSON object: {\"score\": <number>, \"reason\"\
+          : \"<brief reason>\"}'\n    )\n\n    def query_student(question: str, max_retries:\
+          \ int = 10) -> str:\n        for attempt in range(max_retries):\n      \
+          \      try:\n                resp = requests.post(\n                   \
+          \ f\"{student_url}/v1/chat/completions\",\n                    json={\n\
           \                        \"model\": \"/mnt/models\",\n                 \
           \       \"messages\": [{\"role\": \"user\", \"content\": question}],\n \
           \                       \"max_tokens\": 256,\n                        \"\
@@ -261,8 +297,19 @@ deploymentSpec:
           \ 60)\n                print(f\"  [{attempt+1}/{max_retries}] Connection\
           \ error, retry in {wait}s: {e}\")\n                time.sleep(wait)\n  \
           \      raise RuntimeError(f\"Student unreachable after {max_retries} retries\"\
-          )\n\n    def teacher_grade(question: str, answer: str) -> dict:\n      \
-          \  resp = requests.post(\n            \"https://api.groq.com/openai/v1/chat/completions\"\
+          )\n\n    def query_teacher(question: str) -> str:\n        resp = requests.post(\n\
+          \            \"https://api.groq.com/openai/v1/chat/completions\",\n    \
+          \        headers={\n                \"Authorization\": f\"Bearer {groq_api_key}\"\
+          ,\n                \"Content-Type\": \"application/json\",\n           \
+          \ },\n            json={\n                \"model\": groq_model,\n     \
+          \           \"messages\": [\n                    {\"role\": \"system\",\
+          \ \"content\": \"You are a helpful and concise assistant.\"},\n        \
+          \            {\"role\": \"user\", \"content\": question},\n            \
+          \    ],\n                \"max_tokens\": 512,\n                \"temperature\"\
+          : 0.7,\n            },\n            timeout=30,\n        )\n        resp.raise_for_status()\n\
+          \        return resp.json()[\"choices\"][0][\"message\"][\"content\"]\n\n\
+          \    def teacher_grade(question: str, answer: str) -> dict:\n        resp\
+          \ = requests.post(\n            \"https://api.groq.com/openai/v1/chat/completions\"\
           ,\n            headers={\n                \"Authorization\": f\"Bearer {groq_api_key}\"\
           ,\n                \"Content-Type\": \"application/json\",\n           \
           \ },\n            json={\n                \"model\": groq_model,\n     \
@@ -283,16 +330,42 @@ deploymentSpec:
           \ = teacher_grade(q, student_answer)\n        print(f\"Teacher Grade: {grade['score']}/10\"\
           )\n        print(f\"Reason: {grade.get('reason', 'N/A')}\")\n\n        results.append({\n\
           \            \"question\": q,\n            \"student_answer\": student_answer,\n\
-          \            \"score\": grade[\"score\"],\n            \"reason\": grade.get(\"\
-          reason\", \"\"),\n        })\n\n    scores = [r[\"score\"] for r in results\
-          \ if isinstance(r.get(\"score\"), (int, float))]\n    avg_score = sum(scores)\
-          \ / len(scores) if scores else 0.0\n\n    print(\"\\n\" + \"=\" * 60)\n\
-          \    print(\"FINAL RESULTS\")\n    print(\"=\" * 60)\n    for i, r in enumerate(results):\n\
-          \        print(f\"  Q{i+1}: {r['score']}/10 -- {r.get('reason', '')}\")\n\
-          \    print(f\"\\n  Average Score: {avg_score:.2f}/10\")\n    print(\"=\"\
-          \ * 60)\n\n    return {\n        \"num_questions\": len(results),\n    \
-          \    \"avg_score\": round(avg_score, 2),\n        \"results\": results,\n\
-          \    }\n\n"
+          \            \"student_score\": grade[\"score\"],\n            \"reason\"\
+          : grade.get(\"reason\", \"\"),\n        })\n\n    student_scores = [r[\"\
+          student_score\"] for r in results if isinstance(r.get(\"student_score\"\
+          ), (int, float))]\n    student_avg = sum(student_scores) / len(student_scores)\
+          \ if student_scores else 0.0\n\n    # Teacher baseline \u2014 same questions,\
+          \ Teacher answers, then self-grade\n    print(\"\\n\" + \"=\" * 60)\n  \
+          \  print(\"TEACHER BASELINE\")\n    print(\"=\" * 60)\n    for i, r in enumerate(results):\n\
+          \        q = r[\"question\"]\n        teacher_answer = query_teacher(q)\n\
+          \        teacher_grade_result = teacher_grade(q, teacher_answer)\n     \
+          \   r[\"teacher_answer\"] = teacher_answer\n        r[\"teacher_score\"\
+          ] = teacher_grade_result[\"score\"]\n        print(f\"  Q{i+1}: {teacher_grade_result['score']}/10\"\
+          )\n\n    teacher_scores = [r[\"teacher_score\"] for r in results if isinstance(r.get(\"\
+          teacher_score\"), (int, float))]\n    teacher_avg = sum(teacher_scores)\
+          \ / len(teacher_scores) if teacher_scores else 0.0\n\n    print(\"\\n\"\
+          \ + \"=\" * 60)\n    print(\"FINAL RESULTS\")\n    print(\"=\" * 60)\n \
+          \   for i, r in enumerate(results):\n        print(f\"  Q{i+1}: student={r['student_score']}/10\
+          \  teacher={r['teacher_score']}/10 -- {r.get('reason', '')}\")\n    print(f\"\
+          \\n  Student Avg: {student_avg:.2f}/10\")\n    print(f\"  Teacher Avg: {teacher_avg:.2f}/10\"\
+          )\n    print(f\"  Score Gap:   {teacher_avg - student_avg:.2f}\")\n    print(\"\
+          =\" * 60)\n\n    # Log to MLflow\n    if mlflow_tracking_uri:\n        mlflow.set_tracking_uri(mlflow_tracking_uri)\n\
+          \        mlflow.set_experiment(\"Distillation-Eval-Hub\")\n        with\
+          \ mlflow.start_run(run_name=f\"pipeline-eval-{model_version}\"):\n     \
+          \       mlflow.set_tag(\"model_version\", model_version)\n            mlflow.set_tag(\"\
+          eval_type\", \"pipeline_benchmark\")\n            mlflow.log_metric(\"student_avg_score\"\
+          , round(student_avg, 4))\n            mlflow.log_metric(\"teacher_avg_score\"\
+          , round(teacher_avg, 4))\n            mlflow.log_metric(\"score_gap\", round(teacher_avg\
+          \ - student_avg, 4))\n            for i, r in enumerate(results):\n    \
+          \            mlflow.log_metric(f\"q{i+1}_student_score\", r[\"student_score\"\
+          ])\n                mlflow.log_metric(f\"q{i+1}_teacher_score\", r[\"teacher_score\"\
+          ])\n            mlflow.log_dict({\"results\": results}, \"eval_results.json\"\
+          )\n        print(f\"MLflow run logged to {mlflow_tracking_uri}\")\n    else:\n\
+          \        print(\"mlflow_tracking_uri not set \u2014 skipping MLflow logging\"\
+          )\n\n    return {\n        \"num_questions\": len(results),\n        \"\
+          student_avg_score\": round(student_avg, 2),\n        \"teacher_avg_score\"\
+          : round(teacher_avg, 2),\n        \"score_gap\": round(teacher_avg - student_avg,\
+          \ 2),\n        \"results\": results,\n    }\n\n"
         image: python:3.11-slim
     exec-extract-gold-data:
       container:
@@ -306,10 +379,10 @@ deploymentSpec:
         - -c
         - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
           \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
-          \ python3 -m pip install --quiet --no-warn-script-location 'mlflow==3.10.0'\
-          \ 'boto3' 'pandas'  &&  python3 -m pip install --quiet --no-warn-script-location\
-          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
-          3.9\"' && \"$0\" \"$@\"\n"
+          \ python3 -m pip install --quiet --no-warn-script-location 'boto3'  && \
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -321,36 +394,76 @@ deploymentSpec:
 
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
-          \ *\n\ndef extract_gold_data(\n    mlflow_tracking_uri: str,\n    s3_endpoint:\
-          \ str,\n    s3_access_key: str,\n    s3_secret_key: str,\n    experiment_name:\
+          \ *\n\ndef extract_gold_data(\n    s3_endpoint: str,\n    s3_access_key:\
+          \ str,\n    s3_secret_key: str,\n    teacher_bucket: str,\n    teacher_prefix:\
+          \ str,\n    synthetic_bucket: str,\n    synthetic_prefix: str,\n    cursor_key:\
           \ str,\n    output_s3_path: str,\n    min_threshold: int = 0,\n) -> str:\n\
-          \    \"\"\"Extract teacher traces from MLflow, upload as JSONL to MinIO.\"\
-          \"\"\n    import json\n    import os\n    import mlflow\n\n    mlflow.set_tracking_uri(mlflow_tracking_uri)\n\
-          \    experiment = mlflow.get_experiment_by_name(experiment_name)\n    if\
-          \ not experiment:\n        raise RuntimeError(f\"Experiment '{experiment_name}'\
-          \ not found in MLflow\")\n\n    traces = mlflow.search_traces(\n       \
-          \ experiment_ids=[experiment.experiment_id],\n        max_results=1000,\n\
-          \    )\n\n    gold_pairs = []\n    for _, row in traces.iterrows():\n  \
-          \      req = row.get(\"request\")\n        resp = row.get(\"response\")\n\
-          \        if not req or not resp:\n            continue\n        if isinstance(req,\
-          \ str):\n            req = json.loads(req)\n\n        model_choice = req.get(\"\
-          model_choice\", \"\")\n        if \"70B\" not in model_choice and \"Teacher\"\
-          \ not in model_choice:\n            continue\n\n        question = req.get(\"\
-          message\", \"\")\n        answer = resp if isinstance(resp, str) else str(resp)\n\
-          \n        if question and answer:\n            gold_pairs.append({\n   \
-          \             \"instruction\": question,\n                \"output\": answer,\n\
-          \                \"text\": f\"### Instruction:\\n{question}\\n\\n### Response:\\\
-          n{answer}\",\n            })\n\n    print(f\"Found {len(gold_pairs)} gold\
-          \ teacher pairs out of {len(traces)} total traces.\")\n\n    if min_threshold\
-          \ and len(gold_pairs) < min_threshold:\n        raise RuntimeError(\n  \
-          \          f\"Only {len(gold_pairs)} pairs found, below threshold {min_threshold}\"\
-          \n        )\n\n    import boto3\n\n    parts = output_s3_path.replace(\"\
-          s3://\", \"\").split(\"/\", 1)\n    bucket, key = parts[0], parts[1]\n \
-          \   body = \"\\n\".join(json.dumps(p) for p in gold_pairs)\n\n    s3 = boto3.client(\n\
-          \        \"s3\",\n        endpoint_url=s3_endpoint,\n        aws_access_key_id=s3_access_key,\n\
-          \        aws_secret_access_key=s3_secret_key,\n    )\n    s3.put_object(Bucket=bucket,\
-          \ Key=key, Body=body.encode())\n    print(f\"Uploaded {len(gold_pairs)}\
-          \ pairs to {output_s3_path}\")\n\n    return output_s3_path\n\n"
+          \    \"\"\"Read teacher interactions (incremental) and synthetic data from\
+          \ MinIO, write merged gold JSONL.\"\"\"\n    import json\n    import random\n\
+          \    import boto3\n\n    s3 = boto3.client(\n        \"s3\",\n        endpoint_url=s3_endpoint,\n\
+          \        aws_access_key_id=s3_access_key,\n        aws_secret_access_key=s3_secret_key,\n\
+          \    )\n\n    # 1. Read cursor\n    last_ts = 0.0\n    try:\n        obj\
+          \ = s3.get_object(Bucket=teacher_bucket, Key=cursor_key)\n        cursor_data\
+          \ = json.loads(obj[\"Body\"].read().decode(\"utf-8\"))\n        last_ts\
+          \ = float(cursor_data.get(\"last_processed_timestamp\", 0))\n        print(f\"\
+          Cursor loaded: last_processed_timestamp={last_ts}\")\n    except s3.exceptions.NoSuchKey:\n\
+          \        print(\"No cursor found \u2014 processing all teacher interactions.\"\
+          )\n    except Exception as exc:\n        print(f\"Warning: could not read\
+          \ cursor: {exc}. Processing all teacher interactions.\")\n\n    # 2. List\
+          \ and read teacher interactions (incremental)\n    teacher_pairs = []\n\
+          \    max_ts = last_ts\n    paginator = s3.get_paginator(\"list_objects_v2\"\
+          )\n\n    for page in paginator.paginate(Bucket=teacher_bucket, Prefix=teacher_prefix):\n\
+          \        for item in page.get(\"Contents\", []):\n            key = item[\"\
+          Key\"]\n            if key.endswith(\".cursor.json\") or key == teacher_prefix:\n\
+          \                continue\n            try:\n                body = s3.get_object(Bucket=teacher_bucket,\
+          \ Key=key)[\"Body\"].read().decode(\"utf-8\")\n                record =\
+          \ json.loads(body)\n                ts = float(record.get(\"timestamp\"\
+          , 0))\n                if ts <= last_ts:\n                    continue\n\
+          \n                instr = record.get(\"instruction\", \"\").strip()\n  \
+          \              outp = record.get(\"output\", \"\").strip()\n           \
+          \     if not instr or not outp:\n                    continue\n\n      \
+          \          text = record.get(\"text\") or f\"### Instruction:\\n{instr}\\\
+          n\\n### Response:\\n{outp}\"\n                teacher_pairs.append({\n \
+          \                   \"instruction\": instr,\n                    \"output\"\
+          : outp,\n                    \"text\": text,\n                })\n     \
+          \           if ts > max_ts:\n                    max_ts = ts\n         \
+          \   except Exception as exc:\n                print(f\"Warning: skipping\
+          \ {key}: {exc}\")\n\n    teacher_pairs.sort(key=lambda p: p[\"instruction\"\
+          ])\n    print(f\"Teacher: {len(teacher_pairs)} new interactions (since ts={last_ts})\"\
+          )\n\n    # 3. Read synthetic data (all objects under synthetic prefix)\n\
+          \    synthetic_pairs = []\n    for page in paginator.paginate(Bucket=synthetic_bucket,\
+          \ Prefix=synthetic_prefix):\n        for item in page.get(\"Contents\",\
+          \ []):\n            key = item[\"Key\"]\n            if key == synthetic_prefix:\n\
+          \                continue\n            try:\n                body = s3.get_object(Bucket=synthetic_bucket,\
+          \ Key=key)[\"Body\"].read().decode(\"utf-8\")\n                for line\
+          \ in body.strip().splitlines():\n                    line = line.strip()\n\
+          \                    if not line:\n                        continue\n  \
+          \                  record = json.loads(line)\n                    instr\
+          \ = record.get(\"instruction\", \"\").strip()\n                    outp\
+          \ = record.get(\"output\", \"\").strip()\n                    if not instr\
+          \ or not outp:\n                        continue\n                    text\
+          \ = record.get(\"text\") or f\"### Instruction:\\n{instr}\\n\\n### Response:\\\
+          n{outp}\"\n                    synthetic_pairs.append({\n              \
+          \          \"instruction\": instr,\n                        \"output\":\
+          \ outp,\n                        \"text\": text,\n                    })\n\
+          \            except Exception as exc:\n                print(f\"Warning:\
+          \ skipping synthetic {key}: {exc}\")\n\n    print(f\"Synthetic: {len(synthetic_pairs)}\
+          \ pairs\")\n\n    # 4. Merge, shuffle, and write gold\n    gold_pairs =\
+          \ teacher_pairs + synthetic_pairs\n    total = len(gold_pairs)\n    print(f\"\
+          Total pairs: {total} (teacher={len(teacher_pairs)}, synthetic={len(synthetic_pairs)})\"\
+          )\n\n    if total > 1:\n        random.shuffle(gold_pairs)\n\n    if min_threshold\
+          \ and total < min_threshold:\n        raise RuntimeError(f\"Only {total}\
+          \ pairs found, below threshold {min_threshold}\")\n\n    out_parts = output_s3_path.replace(\"\
+          s3://\", \"\").split(\"/\", 1)\n    out_bucket, out_key = out_parts[0],\
+          \ out_parts[1]\n    body = \"\\n\".join(json.dumps(p) for p in gold_pairs)\n\
+          \n    s3.put_object(Bucket=out_bucket, Key=out_key, Body=body.encode())\n\
+          \    print(f\"Uploaded {total} gold pairs to {output_s3_path}\")\n\n   \
+          \ # 5. Advance cursor\n    if max_ts > last_ts:\n        cursor_body = json.dumps({\"\
+          last_processed_timestamp\": max_ts})\n        s3.put_object(\n         \
+          \   Bucket=teacher_bucket,\n            Key=cursor_key,\n            Body=cursor_body.encode(),\n\
+          \            ContentType=\"application/json\",\n        )\n        print(f\"\
+          Cursor advanced to {max_ts}\")\n    else:\n        print(\"Cursor unchanged\
+          \ (no new teacher interactions).\")\n\n    return output_s3_path\n\n"
         image: python:3.11-slim
     exec-finetune:
       container:
@@ -506,7 +619,7 @@ deploymentSpec:
           \ model_output_path=model_output_path)\n\n"
         image: python:3.11-slim
 pipelineInfo:
-  description: Extract teacher traces, fine-tune student, deploy, and evaluate.
+  description: Extract teacher + synthetic gold, fine-tune student, deploy, and evaluate.
   name: distillation-flywheel
 root:
   dag:
@@ -537,12 +650,27 @@ root:
           name: comp-evaluate
         dependentTasks:
         - deploy-model
+        - resolve-version
         inputs:
           parameters:
             groq_api_key:
               componentInputParameter: groq_api_key
             groq_model:
               componentInputParameter: groq_model
+            mlflow_tracking_uri:
+              runtimeValue:
+                constant: http://mlflow.sridharproject.svc.cluster.local:5000
+            model_version:
+              taskOutputParameter:
+                outputParameterKey: version
+                producerTask: resolve-version
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_endpoint:
+              runtimeValue:
+                constant: http://minio.sridharproject.svc.cluster.local:9000
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
             student_url:
               taskOutputParameter:
                 outputParameterKey: Output
@@ -565,14 +693,11 @@ root:
         - resolve-version
         inputs:
           parameters:
-            experiment_name:
+            cursor_key:
               runtimeValue:
-                constant: Distillation-Eval-Hub
+                constant: teacher-interactions/.cursor.json
             min_threshold:
               componentInputParameter: min_gold_threshold
-            mlflow_tracking_uri:
-              runtimeValue:
-                constant: http://mlflow.sridharproject.svc.cluster.local:5000
             output_s3_path:
               taskOutputParameter:
                 outputParameterKey: gold_data_path
@@ -584,6 +709,18 @@ root:
                 constant: http://minio.sridharproject.svc.cluster.local:9000
             s3_secret_key:
               componentInputParameter: s3_secret_key
+            synthetic_bucket:
+              runtimeValue:
+                constant: mlflow-artifacts
+            synthetic_prefix:
+              runtimeValue:
+                constant: synthetic/
+            teacher_bucket:
+              runtimeValue:
+                constant: mlflow-artifacts
+            teacher_prefix:
+              runtimeValue:
+                constant: teacher-interactions/
         taskInfo:
           name: extract-gold-data
       finetune:
