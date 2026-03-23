@@ -4,6 +4,7 @@ import json
 import time
 import uuid
 import warnings
+import traceback
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 load_dotenv()
@@ -158,7 +159,11 @@ def chat(message: str, model_choice: str):
 
     if use_teacher:
         reply = call_teacher(message)
-        log_training_pair(message, reply)
+        try:
+            log_training_pair(message, reply)
+        except Exception as exc:
+            traceback.print_exc()
+            reply += f"\n\n_(Warning: could not log to MinIO — {exc}. Start MinIO port-forward if needed.)_"
         return reply
     else:
         return _handle_student(message)
@@ -177,30 +182,31 @@ def _handle_student(message: str):
     reply = call_student(message)
     score, reason = grade_response(message, reply)
     if score is not None:
-        # Log as a proper MLflow Assessment — populates the Assessments tab in Traces UI
-        trace_id = mlflow.get_active_trace_id()
-        if trace_id:
-            mlflow.log_assessment(
-                trace_id=trace_id,
-                assessment=Feedback(
-                    name="teacher_score",
-                    value=score,
-                    rationale=reason or None,
-                    source=AssessmentSource(
-                        source_type=AssessmentSourceType.LLM_JUDGE,
-                        source_id=TEACHER_MODEL,
+        try:
+            trace_id = mlflow.get_active_trace_id()
+            if trace_id:
+                mlflow.log_assessment(
+                    trace_id=trace_id,
+                    assessment=Feedback(
+                        name="teacher_score",
+                        value=score,
+                        rationale=reason or None,
+                        source=AssessmentSource(
+                            source_type=AssessmentSourceType.LLM_JUDGE,
+                            source_id=TEACHER_MODEL,
+                        ),
+                        metadata={"model_version": MODEL_VERSION, "scale": "1-10"},
                     ),
-                    metadata={"model_version": MODEL_VERSION, "scale": "1-10"},
-                ),
-            )
-        # Also log as a chartable MLflow Run metric
-        with mlflow.start_run(
-            run_name=f"student-turn-{int(time.time())}",
-            tags={"model_version": MODEL_VERSION, "turn_type": "student"},
-        ):
-            mlflow.log_metric("teacher_score", score)
-            mlflow.log_param("question", message[:500])
-            mlflow.log_param("teacher_reason", reason)
+                )
+            with mlflow.start_run(
+                run_name=f"student-turn-{int(time.time())}",
+                tags={"model_version": MODEL_VERSION, "turn_type": "student"},
+            ):
+                mlflow.log_metric("teacher_score", score)
+                mlflow.log_param("question", message[:500])
+                mlflow.log_param("teacher_reason", reason)
+        except Exception:
+            traceback.print_exc()
     suffix = ""
     if score is not None:
         suffix = f"\n\n**Grade: {score}/10**"
@@ -254,9 +260,17 @@ with gr.Blocks(title="Distillation Flywheel") as demo:
     clear = gr.ClearButton([msg, chatbot])
 
     def respond(message, chat_history, model_choice):
-        reply = chat(message, model_choice)
-        chat_history.append({"role": "user", "content": message})
-        chat_history.append({"role": "assistant", "content": reply})
+        chat_history = chat_history or []
+        try:
+            reply = chat(message, model_choice)
+            chat_history.append({"role": "user", "content": message})
+            chat_history.append({"role": "assistant", "content": reply})
+        except Exception as exc:
+            traceback.print_exc()
+            chat_history.append({"role": "user", "content": message})
+            chat_history.append(
+                {"role": "assistant", "content": f"ERROR (UI): {exc}\n\nSee terminal for full traceback."}
+            )
         return "", chat_history
 
     msg.submit(respond, [msg, chatbot, model_selector], [msg, chatbot])
