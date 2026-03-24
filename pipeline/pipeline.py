@@ -33,11 +33,27 @@ SYNTHETIC_PREFIX = "synthetic/"
 CURSOR_KEY = "teacher-interactions/.cursor.json"
 
 TEST_QUESTIONS = [
+    # General ML / distillation
     "What is knowledge distillation and why is it useful?",
     "Explain the difference between LoRA and full fine-tuning.",
     "How does QLoRA reduce memory usage during training?",
     "What are the advantages of smaller language models in production?",
     "Describe the role of a teacher model in model compression.",
+    # Kubeflow Pipelines
+    "What is a KFP component and how do you create one with the Python SDK?",
+    "How do you pass artifacts between components in a Kubeflow pipeline?",
+    # Training Operator
+    "Explain the difference between PyTorchJob and TrainJob in the Training Operator.",
+    "How do you configure multi-node distributed training with the Training Operator?",
+    # KServe
+    "How does KServe handle canary deployments for ML models?",
+    "What is the difference between Serverless and RawDeployment mode in KServe?",
+    # Katib
+    "What search algorithms does Katib support for hyperparameter tuning?",
+    "How do you define the search space for a Katib experiment?",
+    # Platform
+    "How do you set up multi-tenancy in Kubeflow using profiles?",
+    "What are the core components of a Kubeflow deployment?",
 ]
 
 

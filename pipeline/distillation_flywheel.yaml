@@ -297,33 +297,33 @@ deploymentSpec:
           \ 60)\n                print(f\"  [{attempt+1}/{max_retries}] Connection\
           \ error, retry in {wait}s: {e}\")\n                time.sleep(wait)\n  \
           \      raise RuntimeError(f\"Student unreachable after {max_retries} retries\"\
-          )\n\n    def query_teacher(question: str) -> str:\n        resp = requests.post(\n\
-          \            \"https://api.groq.com/openai/v1/chat/completions\",\n    \
-          \        headers={\n                \"Authorization\": f\"Bearer {groq_api_key}\"\
-          ,\n                \"Content-Type\": \"application/json\",\n           \
-          \ },\n            json={\n                \"model\": groq_model,\n     \
-          \           \"messages\": [\n                    {\"role\": \"system\",\
-          \ \"content\": \"You are a helpful and concise assistant.\"},\n        \
-          \            {\"role\": \"user\", \"content\": question},\n            \
-          \    ],\n                \"max_tokens\": 512,\n                \"temperature\"\
-          : 0.7,\n            },\n            timeout=30,\n        )\n        resp.raise_for_status()\n\
-          \        return resp.json()[\"choices\"][0][\"message\"][\"content\"]\n\n\
-          \    def teacher_grade(question: str, answer: str) -> dict:\n        resp\
-          \ = requests.post(\n            \"https://api.groq.com/openai/v1/chat/completions\"\
-          ,\n            headers={\n                \"Authorization\": f\"Bearer {groq_api_key}\"\
-          ,\n                \"Content-Type\": \"application/json\",\n           \
-          \ },\n            json={\n                \"model\": groq_model,\n     \
-          \           \"messages\": [\n                    {\"role\": \"system\",\
-          \ \"content\": GRADING_PROMPT},\n                    {\n               \
-          \         \"role\": \"user\",\n                        \"content\": f\"\
-          Question: {question}\\n\\nStudent Response: {answer}\",\n              \
-          \      },\n                ],\n                \"max_tokens\": 200,\n  \
-          \              \"temperature\": 0.0,\n            },\n            timeout=30,\n\
-          \        )\n        resp.raise_for_status()\n        raw = resp.json()[\"\
-          choices\"][0][\"message\"][\"content\"]\n        try:\n            return\
-          \ json.loads(raw)\n        except json.JSONDecodeError:\n            return\
-          \ {\"score\": 0, \"reason\": f\"Failed to parse: {raw}\"}\n\n    print(\"\
-          \\n\" + \"=\" * 60)\n    results = []\n    for i, q in enumerate(test_questions):\n\
+          )\n\n    def _groq_call(messages: list, max_tokens: int = 512, temperature:\
+          \ float = 0.7) -> str:\n        \"\"\"Call Groq API with exponential backoff\
+          \ on 429 rate limits.\"\"\"\n        for attempt in range(8):\n        \
+          \    resp = requests.post(\n                \"https://api.groq.com/openai/v1/chat/completions\"\
+          ,\n                headers={\n                    \"Authorization\": f\"\
+          Bearer {groq_api_key}\",\n                    \"Content-Type\": \"application/json\"\
+          ,\n                },\n                json={\n                    \"model\"\
+          : groq_model,\n                    \"messages\": messages,\n           \
+          \         \"max_tokens\": max_tokens,\n                    \"temperature\"\
+          : temperature,\n                },\n                timeout=60,\n      \
+          \      )\n            if resp.status_code == 429:\n                wait\
+          \ = min(2 ** attempt * 5, 120)\n                print(f\"  [Groq 429] Rate\
+          \ limited, waiting {wait}s (attempt {attempt+1}/8)\")\n                time.sleep(wait)\n\
+          \                continue\n            resp.raise_for_status()\n       \
+          \     return resp.json()[\"choices\"][0][\"message\"][\"content\"]\n   \
+          \     resp.raise_for_status()\n        return \"\"\n\n    def query_teacher(question:\
+          \ str) -> str:\n        return _groq_call([\n            {\"role\": \"system\"\
+          , \"content\": \"You are a helpful and concise assistant.\"},\n        \
+          \    {\"role\": \"user\", \"content\": question},\n        ], max_tokens=512,\
+          \ temperature=0.7)\n\n    def teacher_grade(question: str, answer: str)\
+          \ -> dict:\n        raw = _groq_call([\n            {\"role\": \"system\"\
+          , \"content\": GRADING_PROMPT},\n            {\"role\": \"user\", \"content\"\
+          : f\"Question: {question}\\n\\nStudent Response: {answer}\"},\n        ],\
+          \ max_tokens=200, temperature=0.0)\n        try:\n            return json.loads(raw)\n\
+          \        except json.JSONDecodeError:\n            return {\"score\": 0,\
+          \ \"reason\": f\"Failed to parse: {raw}\"}\n\n    print(\"\\n\" + \"=\"\
+          \ * 60)\n    results = []\n    for i, q in enumerate(test_questions):\n\
           \        print(f\"\\n--- Question {i+1}/{len(test_questions)} ---\")\n \
           \       print(f\"Q: {q}\")\n\n        student_answer = query_student(q)\n\
           \        print(f\"\\nStudent:\\n{student_answer}\\n\")\n\n        grade\
@@ -331,17 +331,18 @@ deploymentSpec:
           )\n        print(f\"Reason: {grade.get('reason', 'N/A')}\")\n\n        results.append({\n\
           \            \"question\": q,\n            \"student_answer\": student_answer,\n\
           \            \"student_score\": grade[\"score\"],\n            \"reason\"\
-          : grade.get(\"reason\", \"\"),\n        })\n\n    student_scores = [r[\"\
-          student_score\"] for r in results if isinstance(r.get(\"student_score\"\
-          ), (int, float))]\n    student_avg = sum(student_scores) / len(student_scores)\
-          \ if student_scores else 0.0\n\n    # Teacher baseline \u2014 same questions,\
-          \ Teacher answers, then self-grade\n    print(\"\\n\" + \"=\" * 60)\n  \
-          \  print(\"TEACHER BASELINE\")\n    print(\"=\" * 60)\n    for i, r in enumerate(results):\n\
-          \        q = r[\"question\"]\n        teacher_answer = query_teacher(q)\n\
-          \        teacher_grade_result = teacher_grade(q, teacher_answer)\n     \
-          \   r[\"teacher_answer\"] = teacher_answer\n        r[\"teacher_score\"\
-          ] = teacher_grade_result[\"score\"]\n        print(f\"  Q{i+1}: {teacher_grade_result['score']}/10\"\
-          )\n\n    teacher_scores = [r[\"teacher_score\"] for r in results if isinstance(r.get(\"\
+          : grade.get(\"reason\", \"\"),\n        })\n        time.sleep(3)\n\n  \
+          \  student_scores = [r[\"student_score\"] for r in results if isinstance(r.get(\"\
+          student_score\"), (int, float))]\n    student_avg = sum(student_scores)\
+          \ / len(student_scores) if student_scores else 0.0\n\n    # Teacher baseline\
+          \ \u2014 same questions, Teacher answers, then self-grade\n    print(\"\\\
+          n\" + \"=\" * 60)\n    print(\"TEACHER BASELINE\")\n    print(\"=\" * 60)\n\
+          \    for i, r in enumerate(results):\n        q = r[\"question\"]\n    \
+          \    teacher_answer = query_teacher(q)\n        teacher_grade_result = teacher_grade(q,\
+          \ teacher_answer)\n        r[\"teacher_answer\"] = teacher_answer\n    \
+          \    r[\"teacher_score\"] = teacher_grade_result[\"score\"]\n        print(f\"\
+          \  Q{i+1}: {teacher_grade_result['score']}/10\")\n        time.sleep(3)\n\
+          \n    teacher_scores = [r[\"teacher_score\"] for r in results if isinstance(r.get(\"\
           teacher_score\"), (int, float))]\n    teacher_avg = sum(teacher_scores)\
           \ / len(teacher_scores) if teacher_scores else 0.0\n\n    print(\"\\n\"\
           \ + \"=\" * 60)\n    print(\"FINAL RESULTS\")\n    print(\"=\" * 60)\n \
@@ -683,6 +684,20 @@ root:
                 - How does QLoRA reduce memory usage during training?
                 - What are the advantages of smaller language models in production?
                 - Describe the role of a teacher model in model compression.
+                - What is a KFP component and how do you create one with the Python
+                  SDK?
+                - How do you pass artifacts between components in a Kubeflow pipeline?
+                - Explain the difference between PyTorchJob and TrainJob in the Training
+                  Operator.
+                - How do you configure multi-node distributed training with the Training
+                  Operator?
+                - How does KServe handle canary deployments for ML models?
+                - What is the difference between Serverless and RawDeployment mode
+                  in KServe?
+                - What search algorithms does Katib support for hyperparameter tuning?
+                - How do you define the search space for a Katib experiment?
+                - How do you set up multi-tenancy in Kubeflow using profiles?
+                - What are the core components of a Kubeflow deployment?
         taskInfo:
           name: evaluate
       extract-gold-data:

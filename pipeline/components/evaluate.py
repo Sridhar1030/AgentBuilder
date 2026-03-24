@@ -86,50 +86,44 @@ def evaluate(
                 time.sleep(wait)
         raise RuntimeError(f"Student unreachable after {max_retries} retries")
 
-    def query_teacher(question: str) -> str:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {groq_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": groq_model,
-                "messages": [
-                    {"role": "system", "content": "You are a helpful and concise assistant."},
-                    {"role": "user", "content": question},
-                ],
-                "max_tokens": 512,
-                "temperature": 0.7,
-            },
-            timeout=30,
-        )
+    def _groq_call(messages: list, max_tokens: int = 512, temperature: float = 0.7) -> str:
+        """Call Groq API with exponential backoff on 429 rate limits."""
+        for attempt in range(8):
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {groq_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": groq_model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+                timeout=60,
+            )
+            if resp.status_code == 429:
+                wait = min(2 ** attempt * 5, 120)
+                print(f"  [Groq 429] Rate limited, waiting {wait}s (attempt {attempt+1}/8)")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        return ""
+
+    def query_teacher(question: str) -> str:
+        return _groq_call([
+            {"role": "system", "content": "You are a helpful and concise assistant."},
+            {"role": "user", "content": question},
+        ], max_tokens=512, temperature=0.7)
 
     def teacher_grade(question: str, answer: str) -> dict:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {groq_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": groq_model,
-                "messages": [
-                    {"role": "system", "content": GRADING_PROMPT},
-                    {
-                        "role": "user",
-                        "content": f"Question: {question}\n\nStudent Response: {answer}",
-                    },
-                ],
-                "max_tokens": 200,
-                "temperature": 0.0,
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"]
+        raw = _groq_call([
+            {"role": "system", "content": GRADING_PROMPT},
+            {"role": "user", "content": f"Question: {question}\n\nStudent Response: {answer}"},
+        ], max_tokens=200, temperature=0.0)
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
@@ -154,6 +148,7 @@ def evaluate(
             "student_score": grade["score"],
             "reason": grade.get("reason", ""),
         })
+        time.sleep(3)
 
     student_scores = [r["student_score"] for r in results if isinstance(r.get("student_score"), (int, float))]
     student_avg = sum(student_scores) / len(student_scores) if student_scores else 0.0
@@ -169,6 +164,7 @@ def evaluate(
         r["teacher_answer"] = teacher_answer
         r["teacher_score"] = teacher_grade_result["score"]
         print(f"  Q{i+1}: {teacher_grade_result['score']}/10")
+        time.sleep(3)
 
     teacher_scores = [r["teacher_score"] for r in results if isinstance(r.get("teacher_score"), (int, float))]
     teacher_avg = sum(teacher_scores) / len(teacher_scores) if teacher_scores else 0.0
