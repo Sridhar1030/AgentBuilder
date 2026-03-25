@@ -1,5 +1,5 @@
 """
-KFP Component 0 — Resolve Version
+KFP Component 0 -- Resolve Version
 
 Scans MinIO for existing student-1b-vN/ prefixes and returns the next
 version string plus pre-built S3 paths for downstream components.

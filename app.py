@@ -80,27 +80,28 @@ def call_teacher(message: str) -> str:
 @mlflow.trace(name="student_inference", span_type="LLM")
 def call_student(message: str) -> str:
     span = get_current_active_span()
-    prompt = f"### Instruction:\n{message}\n\n### Response:\n"
     if span:
         span.set_attributes({
             "model": "student-1b",
             "endpoint": STUDENT_ENDPOINT,
             "model_version": MODEL_VERSION,
-            "prompt_length": len(prompt),
+            "prompt_length": len(message),
         })
     try:
         resp = requests.post(
-            f"{STUDENT_ENDPOINT}/completions",
+            f"{STUDENT_ENDPOINT}/chat/completions",
             json={
                 "model": "/mnt/models",
-                "prompt": prompt,
-                "max_tokens": 256,
+                "messages": [
+                    {"role": "user", "content": message},
+                ],
+                "max_tokens": 400,
                 "temperature": 0.7,
             },
-            timeout=30,
+            timeout=60,
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["text"].strip()
+        return resp.json()["choices"][0]["message"]["content"].strip()
     except requests.exceptions.ConnectionError:
         return "ERROR: Cannot reach Student model at KServe endpoint. Is the InferenceService running?"
     except Exception as e:

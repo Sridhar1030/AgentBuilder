@@ -4,6 +4,8 @@
 # Inputs:
 #    dpo_beta: float [Default: 0.1]
 #    dpo_epochs: int [Default: 1.0]
+#    groq_api_key: str [Default: '']
+#    groq_model: str [Default: 'llama-3.3-70b-versatile']
 #    max_supplement_questions: int [Default: 50.0]
 #    min_dpo_pairs: int [Default: 5.0]
 #    min_gold_threshold: int [Default: 0.0]
@@ -11,9 +13,6 @@
 #    num_epochs: int [Default: 3.0]
 #    s3_access_key: str [Default: 'minioadmin']
 #    s3_secret_key: str [Default: 'minioadmin123']
-#    teacher_api_key: str [Default: '']
-#    teacher_api_url: str [Default: 'http://ollama.sridharproject.svc.cluster.local:11434']
-#    teacher_model: str [Default: 'llama3.1:8b-instruct-q4_K_M']
 components:
   comp-deploy-model:
     executorLabel: exec-deploy-model
@@ -34,7 +33,7 @@ components:
     inputDefinitions:
       parameters:
         batch_size:
-          defaultValue: 1.0
+          defaultValue: 2.0
           isOptional: true
           parameterType: NUMBER_INTEGER
         dpo_beta:
@@ -81,6 +80,10 @@ components:
     executorLabel: exec-evaluate
     inputDefinitions:
       parameters:
+        groq_api_key:
+          parameterType: STRING
+        groq_model:
+          parameterType: STRING
         mlflow_tracking_uri:
           defaultValue: ''
           isOptional: true
@@ -102,12 +105,6 @@ components:
           isOptional: true
           parameterType: STRING
         student_url:
-          parameterType: STRING
-        teacher_api_key:
-          parameterType: STRING
-        teacher_api_url:
-          parameterType: STRING
-        teacher_model:
           parameterType: STRING
         test_questions:
           parameterType: LIST
@@ -149,6 +146,10 @@ components:
     executorLabel: exec-extract-preferences
     inputDefinitions:
       parameters:
+        groq_api_key:
+          parameterType: STRING
+        groq_model:
+          parameterType: STRING
         max_supplement_questions:
           defaultValue: 50.0
           isOptional: true
@@ -176,12 +177,6 @@ components:
         sft_run_name_prefix:
           parameterType: STRING
         student_url:
-          parameterType: STRING
-        teacher_api_key:
-          parameterType: STRING
-        teacher_api_url:
-          parameterType: STRING
-        teacher_model:
           parameterType: STRING
     outputDefinitions:
       parameters:
@@ -355,7 +350,7 @@ deploymentSpec:
           \ *\n\ndef dpo_finetune(\n    sft_model_s3_path: str,\n    pref_data_s3_path:\
           \ str,\n    model_version: str,\n    s3_endpoint: str,\n    s3_access_key:\
           \ str,\n    s3_secret_key: str,\n    num_epochs: int = 1,\n    batch_size:\
-          \ int = 1,\n    learning_rate: float = 5e-5,\n    lora_r: int = 16,\n  \
+          \ int = 2,\n    learning_rate: float = 5e-5,\n    lora_r: int = 16,\n  \
           \  lora_alpha: int = 32,\n    dpo_beta: float = 0.1,\n    min_pairs: int\
           \ = 5,\n) -> str:\n    \"\"\"Submit a Kubeflow TrainJob for DPO training\
           \ on preference data.\"\"\"\n    import time\n\n    import boto3\n    from\
@@ -371,7 +366,7 @@ deploymentSpec:
           \ -- skipping DPO, passing through SFT model\")\n        return sft_model_s3_path\n\
           \n    config.load_incluster_config()\n    custom_api = client.CustomObjectsApi()\n\
           \n    namespace = \"sridharproject\"\n    job_name = f\"dpo-{int(time.time())}\"\
-          \n    image = \"quay.io/rh-ee-srpillai/distillation-trainer:v0.5.2\"\n\n\
+          \n    image = \"quay.io/rh-ee-srpillai/distillation-trainer:v0.2.0\"\n\n\
           \    trainjob = {\n        \"apiVersion\": \"trainer.kubeflow.org/v1alpha1\"\
           ,\n        \"kind\": \"TrainJob\",\n        \"metadata\": {\n          \
           \  \"name\": job_name,\n            \"namespace\": namespace,\n        },\n\
@@ -460,42 +455,40 @@ deploymentSpec:
 
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
-          \ *\n\ndef evaluate(\n    student_url: str,\n    teacher_api_url: str,\n\
-          \    teacher_model: str,\n    teacher_api_key: str,\n    test_questions:\
-          \ list,\n    mlflow_tracking_uri: str = \"\",\n    model_version: str =\
-          \ \"unknown\",\n    s3_endpoint: str = \"\",\n    s3_access_key: str = \"\
-          \",\n    s3_secret_key: str = \"\",\n) -> dict:\n    \"\"\"Send test questions\
-          \ to Student, have Teacher grade responses, log to MLflow.\"\"\"\n    import\
-          \ json\n    import os\n    import time\n    import requests\n    import\
-          \ mlflow\n\n    if mlflow_tracking_uri.startswith(\"https://\"):\n     \
-          \   os.environ.setdefault(\"MLFLOW_TRACKING_INSECURE_TLS\", \"true\")\n\n\
-          \    if s3_endpoint:\n        os.environ.setdefault(\"MLFLOW_S3_ENDPOINT_URL\"\
+          \ *\n\ndef evaluate(\n    student_url: str,\n    groq_api_key: str,\n  \
+          \  groq_model: str,\n    test_questions: list,\n    mlflow_tracking_uri:\
+          \ str = \"\",\n    model_version: str = \"unknown\",\n    s3_endpoint: str\
+          \ = \"\",\n    s3_access_key: str = \"\",\n    s3_secret_key: str = \"\"\
+          ,\n) -> dict:\n    \"\"\"Send test questions to Student, have Teacher grade\
+          \ responses, log to MLflow.\"\"\"\n    import json\n    import os\n    import\
+          \ time\n    import requests\n    import mlflow\n\n    if mlflow_tracking_uri.startswith(\"\
+          https://\"):\n        os.environ.setdefault(\"MLFLOW_TRACKING_INSECURE_TLS\"\
+          , \"true\")\n\n    if s3_endpoint:\n        os.environ.setdefault(\"MLFLOW_S3_ENDPOINT_URL\"\
           , s3_endpoint)\n        if s3_endpoint.startswith(\"https://\"):\n     \
           \       os.environ.setdefault(\"MLFLOW_S3_IGNORE_TLS\", \"true\")\n    if\
           \ s3_access_key:\n        os.environ.setdefault(\"AWS_ACCESS_KEY_ID\", s3_access_key)\n\
           \    if s3_secret_key:\n        os.environ.setdefault(\"AWS_SECRET_ACCESS_KEY\"\
-          , s3_secret_key)\n\n    api_url = teacher_api_url.rstrip(\"/\")\n    if\
-          \ not api_url.endswith(\"/v1/chat/completions\"):\n        api_url = api_url.rstrip(\"\
-          /\") + \"/v1/chat/completions\"\n\n    api_headers = {\"Content-Type\":\
-          \ \"application/json\"}\n    if teacher_api_key:\n        api_headers[\"\
-          Authorization\"] = f\"Bearer {teacher_api_key}\"\n\n    print(f\"Student\
-          \ URL: {student_url}\")\n    print(f\"Teacher API: {api_url}\")\n    print(f\"\
-          Teacher model: {teacher_model}\")\n    print(f\"Test questions: {len(test_questions)}\"\
-          )\n\n    GRADING_PROMPT = (\n        \"You are an expert grader. Rate the\
-          \ following AI response to the given question \"\n        \"on a scale of\
-          \ 1 to 10, where 1 is completely wrong and 10 is perfect. \"\n        'Respond\
-          \ with ONLY a JSON object: {\"score\": <number>, \"reason\": \"<brief reason>\"\
-          }'\n    )\n\n    def query_student(question: str, max_retries: int = 10)\
-          \ -> str:\n        for attempt in range(max_retries):\n            try:\n\
-          \                resp = requests.post(\n                    f\"{student_url}/v1/chat/completions\"\
-          ,\n                    json={\n                        \"model\": \"/mnt/models\"\
-          ,\n                        \"messages\": [{\"role\": \"user\", \"content\"\
-          : question}],\n                        \"max_tokens\": 256,\n          \
-          \              \"temperature\": 0.3,\n                    },\n         \
-          \           timeout=90,\n                )\n                if resp.status_code\
-          \ in (404, 503):\n                    wait = min(15 * (attempt + 1), 60)\n\
-          \                    print(f\"  [{attempt+1}/{max_retries}] HTTP {resp.status_code},\
-          \ vLLM not ready. Retry in {wait}s\")\n                    time.sleep(wait)\n\
+          , s3_secret_key)\n\n    if not groq_api_key:\n        raise ValueError(\n\
+          \            \"groq_api_key is empty. Pass your Groq API key as a pipeline\
+          \ parameter.\"\n        )\n\n    print(f\"Student URL: {student_url}\")\n\
+          \    print(f\"Groq model: {groq_model}\")\n    print(f\"Test questions:\
+          \ {len(test_questions)}\")\n    print(f\"Groq API key: set ({len(groq_api_key)}\
+          \ chars)\")\n\n    GRADING_PROMPT = (\n        \"You are an expert grader.\
+          \ Rate the following AI response to the given question \"\n        \"on\
+          \ a scale of 1 to 10, where 1 is completely wrong and 10 is perfect. \"\n\
+          \        'Respond with ONLY a JSON object: {\"score\": <number>, \"reason\"\
+          : \"<brief reason>\"}'\n    )\n\n    def query_student(question: str, max_retries:\
+          \ int = 10) -> str:\n        for attempt in range(max_retries):\n      \
+          \      try:\n                resp = requests.post(\n                   \
+          \ f\"{student_url}/v1/chat/completions\",\n                    json={\n\
+          \                        \"model\": \"/mnt/models\",\n                 \
+          \       \"messages\": [{\"role\": \"user\", \"content\": question}],\n \
+          \                       \"max_tokens\": 256,\n                        \"\
+          temperature\": 0.3,\n                    },\n                    timeout=90,\n\
+          \                )\n                if resp.status_code in (404, 503):\n\
+          \                    wait = min(15 * (attempt + 1), 60)\n              \
+          \      print(f\"  [{attempt+1}/{max_retries}] HTTP {resp.status_code}, vLLM\
+          \ not ready. Retry in {wait}s\")\n                    time.sleep(wait)\n\
           \                    continue\n                if not resp.ok:\n       \
           \             print(f\"  HTTP {resp.status_code} from student: {resp.text[:500]}\"\
           )\n                resp.raise_for_status()\n                return resp.json()[\"\
@@ -504,25 +497,27 @@ deploymentSpec:
           \ 60)\n                print(f\"  [{attempt+1}/{max_retries}] Connection\
           \ error, retry in {wait}s: {e}\")\n                time.sleep(wait)\n  \
           \      raise RuntimeError(f\"Student unreachable after {max_retries} retries\"\
-          )\n\n    def _teacher_call(messages: list, max_tokens: int = 512, temperature:\
-          \ float = 0.7) -> str:\n        \"\"\"Call teacher LLM API with exponential\
-          \ backoff on 429 rate limits.\"\"\"\n        for attempt in range(8):\n\
-          \            resp = requests.post(\n                api_url,\n         \
-          \       headers=api_headers,\n                json={\n                 \
-          \   \"model\": teacher_model,\n                    \"messages\": messages,\n\
-          \                    \"max_tokens\": max_tokens,\n                    \"\
-          temperature\": temperature,\n                },\n                timeout=300,\n\
-          \            )\n            if resp.status_code == 429:\n              \
-          \  wait = min(2 ** attempt * 5, 120)\n                print(f\"  [429] Rate\
+          )\n\n    def _groq_call(messages: list, max_tokens: int = 512, temperature:\
+          \ float = 0.7) -> str:\n        \"\"\"Call Groq API with exponential backoff\
+          \ on 429 rate limits.\"\"\"\n        for attempt in range(8):\n        \
+          \    resp = requests.post(\n                \"https://api.groq.com/openai/v1/chat/completions\"\
+          ,\n                headers={\n                    \"Authorization\": f\"\
+          Bearer {groq_api_key}\",\n                    \"Content-Type\": \"application/json\"\
+          ,\n                },\n                json={\n                    \"model\"\
+          : groq_model,\n                    \"messages\": messages,\n           \
+          \         \"max_tokens\": max_tokens,\n                    \"temperature\"\
+          : temperature,\n                },\n                timeout=60,\n      \
+          \      )\n            if resp.status_code == 429:\n                wait\
+          \ = min(2 ** attempt * 5, 120)\n                print(f\"  [Groq 429] Rate\
           \ limited, waiting {wait}s (attempt {attempt+1}/8)\")\n                time.sleep(wait)\n\
           \                continue\n            resp.raise_for_status()\n       \
           \     return resp.json()[\"choices\"][0][\"message\"][\"content\"]\n   \
           \     resp.raise_for_status()\n        return \"\"\n\n    def query_teacher(question:\
-          \ str) -> str:\n        return _teacher_call([\n            {\"role\": \"\
-          system\", \"content\": \"You are a helpful and concise assistant.\"},\n\
-          \            {\"role\": \"user\", \"content\": question},\n        ], max_tokens=512,\
+          \ str) -> str:\n        return _groq_call([\n            {\"role\": \"system\"\
+          , \"content\": \"You are a helpful and concise assistant.\"},\n        \
+          \    {\"role\": \"user\", \"content\": question},\n        ], max_tokens=512,\
           \ temperature=0.7)\n\n    def teacher_grade(question: str, answer: str)\
-          \ -> dict:\n        raw = _teacher_call([\n            {\"role\": \"system\"\
+          \ -> dict:\n        raw = _groq_call([\n            {\"role\": \"system\"\
           , \"content\": GRADING_PROMPT},\n            {\"role\": \"user\", \"content\"\
           : f\"Question: {question}\\n\\nStudent Response: {answer}\"},\n        ],\
           \ max_tokens=200, temperature=0.0)\n        try:\n            return json.loads(raw)\n\
@@ -698,41 +693,38 @@ deploymentSpec:
 
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
-          \ *\n\ndef extract_preferences(\n    student_url: str,\n    teacher_api_url:\
-          \ str,\n    teacher_model: str,\n    teacher_api_key: str,\n    question_bank_s3_path:\
-          \ str,\n    mlflow_tracking_uri: str,\n    sft_run_name_prefix: str,\n \
-          \   model_version: str,\n    s3_endpoint: str,\n    s3_access_key: str,\n\
-          \    s3_secret_key: str,\n    pref_output_bucket: str = \"mlflow-artifacts\"\
-          ,\n    min_score_gap: int = 2,\n    max_supplement_questions: int = 50,\n\
-          ) -> str:\n    \"\"\"Build DPO preference pairs from eval results + supplementary\
-          \ question bank queries.\"\"\"\n    import json\n    import os\n    import\
-          \ time\n    import uuid\n\n    import boto3\n    import mlflow\n    import\
-          \ requests\n\n    if mlflow_tracking_uri.startswith(\"https://\"):\n   \
-          \     os.environ.setdefault(\"MLFLOW_TRACKING_INSECURE_TLS\", \"true\")\n\
-          \    if s3_endpoint:\n        os.environ.setdefault(\"MLFLOW_S3_ENDPOINT_URL\"\
+          \ *\n\ndef extract_preferences(\n    student_url: str,\n    groq_api_key:\
+          \ str,\n    groq_model: str,\n    question_bank_s3_path: str,\n    mlflow_tracking_uri:\
+          \ str,\n    sft_run_name_prefix: str,\n    model_version: str,\n    s3_endpoint:\
+          \ str,\n    s3_access_key: str,\n    s3_secret_key: str,\n    pref_output_bucket:\
+          \ str = \"mlflow-artifacts\",\n    min_score_gap: int = 2,\n    max_supplement_questions:\
+          \ int = 50,\n) -> str:\n    \"\"\"Build DPO preference pairs from eval results\
+          \ + supplementary question bank queries.\"\"\"\n    import json\n    import\
+          \ os\n    import time\n    import uuid\n\n    import boto3\n    import mlflow\n\
+          \    import requests\n\n    if mlflow_tracking_uri.startswith(\"https://\"\
+          ):\n        os.environ.setdefault(\"MLFLOW_TRACKING_INSECURE_TLS\", \"true\"\
+          )\n    if s3_endpoint:\n        os.environ.setdefault(\"MLFLOW_S3_ENDPOINT_URL\"\
           , s3_endpoint)\n        os.environ.setdefault(\"AWS_ACCESS_KEY_ID\", s3_access_key)\n\
           \        os.environ.setdefault(\"AWS_SECRET_ACCESS_KEY\", s3_secret_key)\n\
           \n    s3 = boto3.client(\n        \"s3\",\n        endpoint_url=s3_endpoint,\n\
           \        aws_access_key_id=s3_access_key,\n        aws_secret_access_key=s3_secret_key,\n\
-          \    )\n\n    api_url = teacher_api_url.rstrip(\"/\")\n    if not api_url.endswith(\"\
-          /v1/chat/completions\"):\n        api_url = api_url.rstrip(\"/\") + \"/v1/chat/completions\"\
-          \n\n    headers = {\"Content-Type\": \"application/json\"}\n    if teacher_api_key:\n\
-          \        headers[\"Authorization\"] = f\"Bearer {teacher_api_key}\"\n\n\
-          \    def teacher_llm_call(messages: list, max_tokens: int = 512, temperature:\
+          \    )\n\n    def groq_call(messages: list, max_tokens: int = 512, temperature:\
           \ float = 0.7) -> str:\n        for attempt in range(8):\n            resp\
-          \ = requests.post(\n                api_url,\n                headers=headers,\n\
-          \                json={\n                    \"model\": teacher_model,\n\
-          \                    \"messages\": messages,\n                    \"max_tokens\"\
-          : max_tokens,\n                    \"temperature\": temperature,\n     \
-          \           },\n                timeout=300,\n            )\n          \
-          \  if resp.status_code == 429:\n                wait = min(2 ** attempt\
-          \ * 5, 120)\n                print(f\"  [429] Rate limited, waiting {wait}s\
-          \ (attempt {attempt+1}/8)\")\n                time.sleep(wait)\n       \
-          \         continue\n            resp.raise_for_status()\n            return\
-          \ resp.json()[\"choices\"][0][\"message\"][\"content\"]\n        resp.raise_for_status()\n\
-          \        return \"\"\n\n    def query_student(question: str) -> str:\n \
-          \       for attempt in range(5):\n            try:\n                resp\
-          \ = requests.post(\n                    f\"{student_url}/v1/chat/completions\"\
+          \ = requests.post(\n                \"https://api.groq.com/openai/v1/chat/completions\"\
+          ,\n                headers={\n                    \"Authorization\": f\"\
+          Bearer {groq_api_key}\",\n                    \"Content-Type\": \"application/json\"\
+          ,\n                },\n                json={\n                    \"model\"\
+          : groq_model,\n                    \"messages\": messages,\n           \
+          \         \"max_tokens\": max_tokens,\n                    \"temperature\"\
+          : temperature,\n                },\n                timeout=60,\n      \
+          \      )\n            if resp.status_code == 429:\n                wait\
+          \ = min(2 ** attempt * 5, 120)\n                print(f\"  [Groq 429] waiting\
+          \ {wait}s (attempt {attempt+1}/8)\")\n                time.sleep(wait)\n\
+          \                continue\n            resp.raise_for_status()\n       \
+          \     return resp.json()[\"choices\"][0][\"message\"][\"content\"]\n   \
+          \     resp.raise_for_status()\n        return \"\"\n\n    def query_student(question:\
+          \ str) -> str:\n        for attempt in range(5):\n            try:\n   \
+          \             resp = requests.post(\n                    f\"{student_url}/v1/chat/completions\"\
           ,\n                    json={\n                        \"model\": \"/mnt/models\"\
           ,\n                        \"messages\": [{\"role\": \"user\", \"content\"\
           : question}],\n                        \"max_tokens\": 256,\n          \
@@ -743,7 +735,7 @@ deploymentSpec:
           \                return resp.json()[\"choices\"][0][\"message\"][\"content\"\
           ]\n            except (requests.ConnectionError, requests.Timeout):\n  \
           \              time.sleep(15 * (attempt + 1))\n        return \"\"\n\n \
-          \   def query_teacher(question: str) -> str:\n        return teacher_llm_call([\n\
+          \   def query_teacher(question: str) -> str:\n        return groq_call([\n\
           \            {\"role\": \"system\", \"content\": \"You are a helpful and\
           \ concise assistant.\"},\n            {\"role\": \"user\", \"content\":\
           \ question},\n        ], max_tokens=512, temperature=0.7)\n\n    GRADING_PROMPT\
@@ -751,7 +743,7 @@ deploymentSpec:
           \ to the given question \"\n        \"on a scale of 1 to 10, where 1 is\
           \ completely wrong and 10 is perfect. \"\n        'Respond with ONLY a JSON\
           \ object: {\"score\": <number>, \"reason\": \"<brief reason>\"}'\n    )\n\
-          \n    def grade(question: str, answer: str) -> int:\n        raw = teacher_llm_call([\n\
+          \n    def grade(question: str, answer: str) -> int:\n        raw = groq_call([\n\
           \            {\"role\": \"system\", \"content\": GRADING_PROMPT},\n    \
           \        {\"role\": \"user\", \"content\": f\"Question: {question}\\n\\\
           nResponse: {answer}\"},\n        ], max_tokens=200, temperature=0.0)\n \
@@ -862,7 +854,7 @@ deploymentSpec:
           \ for QLoRA training and wait for completion.\"\"\"\n    import time\n\n\
           \    from kubernetes import client, config\n\n    config.load_incluster_config()\n\
           \    custom_api = client.CustomObjectsApi()\n\n    namespace = \"sridharproject\"\
-          \n    job_name = f\"finetune-{int(time.time())}\"\n    image = \"quay.io/rh-ee-srpillai/distillation-trainer:v0.5.2\"\
+          \n    job_name = f\"finetune-{int(time.time())}\"\n    image = \"quay.io/rh-ee-srpillai/distillation-trainer:v0.1.0\"\
           \n\n    trainjob = {\n        \"apiVersion\": \"trainer.kubeflow.org/v1alpha1\"\
           ,\n        \"kind\": \"TrainJob\",\n        \"metadata\": {\n          \
           \  \"name\": job_name,\n            \"namespace\": namespace,\n        },\n\
@@ -1053,6 +1045,10 @@ root:
         - resolve-version
         inputs:
           parameters:
+            groq_api_key:
+              componentInputParameter: groq_api_key
+            groq_model:
+              componentInputParameter: groq_model
             mlflow_tracking_uri:
               runtimeValue:
                 constant: http://mlflow.sridharproject.svc.cluster.local:5000
@@ -1071,12 +1067,6 @@ root:
               taskOutputParameter:
                 outputParameterKey: Output
                 producerTask: deploy-model
-            teacher_api_key:
-              componentInputParameter: teacher_api_key
-            teacher_api_url:
-              componentInputParameter: teacher_api_url
-            teacher_model:
-              componentInputParameter: teacher_model
             test_questions:
               runtimeValue:
                 constant:
@@ -1148,6 +1138,10 @@ root:
         - resolve-version
         inputs:
           parameters:
+            groq_api_key:
+              componentInputParameter: groq_api_key
+            groq_model:
+              componentInputParameter: groq_model
             max_supplement_questions:
               componentInputParameter: max_supplement_questions
             mlflow_tracking_uri:
@@ -1173,12 +1167,6 @@ root:
             student_url:
               runtimeValue:
                 constant: http://student-llm-predictor.sridharproject.svc.cluster.local:8080
-            teacher_api_key:
-              componentInputParameter: teacher_api_key
-            teacher_api_url:
-              componentInputParameter: teacher_api_url
-            teacher_model:
-              componentInputParameter: teacher_model
         taskInfo:
           name: extract-preferences
       finetune:
@@ -1248,6 +1236,14 @@ root:
         defaultValue: 1.0
         isOptional: true
         parameterType: NUMBER_INTEGER
+      groq_api_key:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      groq_model:
+        defaultValue: llama-3.3-70b-versatile
+        isOptional: true
+        parameterType: STRING
       max_supplement_questions:
         defaultValue: 50.0
         isOptional: true
@@ -1274,18 +1270,6 @@ root:
         parameterType: STRING
       s3_secret_key:
         defaultValue: minioadmin123
-        isOptional: true
-        parameterType: STRING
-      teacher_api_key:
-        defaultValue: ''
-        isOptional: true
-        parameterType: STRING
-      teacher_api_url:
-        defaultValue: http://ollama.sridharproject.svc.cluster.local:11434
-        isOptional: true
-        parameterType: STRING
-      teacher_model:
-        defaultValue: llama3.1:8b-instruct-q4_K_M
         isOptional: true
         parameterType: STRING
 schemaVersion: 2.1.0

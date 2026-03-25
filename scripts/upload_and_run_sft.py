@@ -39,7 +39,9 @@ S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", os.getenv("AWS_SECRET_ACCESS_KEY", "m
 BUCKET = os.getenv("SYNTHETIC_BUCKET", "mlflow-artifacts")
 PREFIX = "synthetic/kubeflow/"
 KFP_ENDPOINT = os.getenv("KFP_ENDPOINT", "https://127.0.0.1:3000")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", os.getenv("API_KEY", ""))
+TEACHER_API_URL = os.getenv("TEACHER_API_URL", "http://ollama.sridharproject.svc.cluster.local:11434")
+TEACHER_MODEL = os.getenv("TEACHER_MODEL", "llama3.1:8b-instruct-q4_K_M")
+TEACHER_API_KEY = os.getenv("TEACHER_API_KEY", "")
 
 
 def get_s3_client():
@@ -126,21 +128,20 @@ def submit_pipeline(yaml_path: str):
     except ImportError:
         sys.exit("ERROR: kfp package not installed. Run: pip install kfp")
 
-    if not GROQ_API_KEY:
-        print("WARNING: GROQ_API_KEY not set — eval step will fail")
-
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     print(f"\nConnecting to KFP at {KFP_ENDPOINT}...")
-    import ssl
-    c = kfp_client.Client(host=KFP_ENDPOINT, ssl_ca_cert=False, verify_ssl=False)
+    import subprocess
+    token = subprocess.check_output(["oc", "whoami", "-t"]).decode().strip()
+    c = kfp_client.Client(host=KFP_ENDPOINT, existing_token=token, ssl_ca_cert=False, verify_ssl=False)
 
     params = {
         "s3_access_key": S3_ACCESS_KEY,
         "s3_secret_key": S3_SECRET_KEY,
-        "groq_api_key": GROQ_API_KEY,
-        "groq_model": "llama-3.3-70b-versatile",
+        "teacher_api_url": TEACHER_API_URL,
+        "teacher_model": TEACHER_MODEL,
+        "teacher_api_key": TEACHER_API_KEY,
         "num_epochs": 3,
         "min_gold_threshold": 0,
     }

@@ -22,25 +22,25 @@ todos:
     status: completed
   - id: p1-run-sft
     content: "Phase 1: Run existing pipeline with Kubeflow data, record baseline eval scores"
-    status: pending
+    status: completed
   - id: p2-extract-prefs
     content: "Phase 2: Build pipeline/components/extract_preferences.py KFP component (MLflow + Source B with question bank)"
-    status: pending
+    status: completed
   - id: p2-dpo-mode
     content: "Phase 2: Add TRAINING_MODE=dpo branch to pipeline/training/finetune_job.py using DPOTrainer"
-    status: pending
+    status: completed
   - id: p2-dpo-component
     content: "Phase 2: Build pipeline/components/dpo_finetune.py KFP component (TrainJob with DPO env vars)"
-    status: pending
+    status: completed
   - id: p2-update-pipeline
     content: "Phase 2: Update pipeline/pipeline.py DAG to insert extract_preferences + dpo_finetune between SFT and Deploy"
-    status: pending
+    status: completed
   - id: p2-rebuild-image
     content: "Phase 2: Rebuild training Docker image with DPO support, push as v0.2.0"
-    status: pending
+    status: completed
   - id: p2-run-dpo
     content: "Phase 2: Run full pipeline (SFT + DPO), compare scores against Phase 1 baseline"
-    status: pending
+    status: in-progress
 isProject: false
 ---
 

@@ -1,5 +1,5 @@
 """
-KFP Component 1 — Extract Gold Data
+KFP Component 1 -- Extract Gold Data
 
 Reads teacher Q&A from MinIO (incremental since last cursor), merges with
 synthetic data from MinIO, writes combined gold JSONL, and advances the cursor.
@@ -44,7 +44,7 @@ def extract_gold_data(
         last_ts = float(cursor_data.get("last_processed_timestamp", 0))
         print(f"Cursor loaded: last_processed_timestamp={last_ts}")
     except s3.exceptions.NoSuchKey:
-        print("No cursor found — processing all teacher interactions.")
+        print("No cursor found -- processing all teacher interactions.")
     except Exception as exc:
         print(f"Warning: could not read cursor: {exc}. Processing all teacher interactions.")
 

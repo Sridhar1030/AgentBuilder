@@ -1,0 +1,192 @@
+# Distillation Flywheel: SFT + DPO Pipeline
+
+## What This Pipeline Does
+
+This pipeline takes a small 1B-parameter language model (Llama 3.2 1B Instruct) and teaches it Kubeflow domain knowledge through a two-stage training process:
+
+1. **SFT (Supervised Fine-Tuning)** -- Learn from curated Q&A pairs
+2. **DPO (Direct Preference Optimization)** -- Learn from "good vs bad" answer comparisons
+
+The result is a compact model that can answer Kubeflow questions accurately, running on a single GPU in production.
+
+---
+
+## Pipeline Architecture
+
+```
+ Resolve Version
+       |
+ Extract Gold Data -----------> 827 Kubeflow Q&A pairs from MinIO
+       |
+ SFT Fine-Tune (QLoRA) -------> Trains on Q&A pairs, produces SFT model
+       |
+ Extract Preferences ----------> Compares Student vs Teacher on 50+ questions
+       |                          Keeps pairs where Teacher wins = preference data
+ DPO Fine-Tune ----------------> Trains on preferences to align model output
+       |
+ Deploy (KServe) --------------> Patches the InferenceService with new model
+       |
+ Evaluate ---------------------> 15 test questions, Teacher grades Student
+                                  Logs scores to MLflow
+```
+
+### What changed from Phase 1
+
+Phase 1 was a 4-step pipeline: Extract Gold -> SFT -> Deploy -> Evaluate.
+
+Phase 2 inserts two new steps between SFT and Deploy:
+
+- **Extract Preferences** -- Builds training data for DPO
+- **DPO Fine-Tune** -- Refines the SFT model using that preference data
+
+---
+
+## Step-by-Step Breakdown
+
+### Step 0: Resolve Version
+
+Auto-increments the model version by scanning existing models in MinIO (`s3://sridhar-models/student-1b-v*`). For this run, it resolved to **v24**.
+
+### Step 1: Extract Gold Data
+
+Collects training data from two sources in MinIO:
+
+- **Teacher interactions** -- Q&A pairs from the Groq 70B teacher model stored during prior sessions
+- **Synthetic data** -- 827 Kubeflow-specific Q&A pairs generated in Phase 1 by crawling Kubeflow docs, GitHub repos, release notes, and YouTube transcripts
+
+These get merged into a single JSONL file (`train-v24.jsonl`) with the format:
+```json
+{"instruction": "What is KServe?", "output": "KServe is...", "text": "<formatted chat template>"}
+```
+
+### Step 2: SFT Fine-Tune (QLoRA)
+
+Submits a Kubeflow **TrainJob** that runs on a GPU node. The training container:
+
+1. Loads `unsloth/Llama-3.2-1B-Instruct` in 4-bit quantization (QLoRA)
+2. Applies LoRA adapters to the attention layers (q/k/v/o projections)
+3. Trains for 3 epochs on the gold data using `SFTTrainer` from the `trl` library
+4. Merges the LoRA weights back into the base model
+5. Uploads the merged model to `s3://sridhar-models/student-1b-v24/`
+
+**Why QLoRA?** It reduces GPU memory from ~16GB (full precision) to ~4GB by keeping the base model in 4-bit and only training small LoRA matrices. This lets us train a 1B model on a single GPU.
+
+**Duration:** ~7 minutes
+
+### Step 3: Extract Preferences (NEW in Phase 2)
+
+This is where DPO data gets created. The component builds **preference pairs** -- triplets of `(prompt, chosen_answer, rejected_answer)` -- from two sources:
+
+**Source A: Previous Eval Results**
+- Pulls `eval_results.json` from the last MLflow evaluation run
+- Filters entries where the Teacher scored significantly higher than the Student (gap >= 2)
+- Teacher's answer becomes `chosen`, Student's answer becomes `rejected`
+
+**Source B: Question Bank Supplement**
+- Loads 139 Kubeflow questions (16 topics) from MinIO
+- Queries both the Student model (via KServe) and the Teacher (via Groq) on up to 50 questions
+- Grades both answers
+- Keeps pairs where the Teacher beats the Student
+
+Output: a JSONL file uploaded to `s3://mlflow-artifacts/preferences/pref-v24-*.jsonl`:
+```json
+{"prompt": "How does KServe handle canary deployments?", "chosen": "<teacher answer>", "rejected": "<student answer>"}
+```
+
+**Why two sources?** Source A reuses existing evaluation data (free). Source B generates fresh comparisons on domain-specific questions, giving the DPO trainer more signal about where the Student is weak.
+
+### Step 4: DPO Fine-Tune (NEW in Phase 2)
+
+Another Kubeflow TrainJob, but this time using `TRAINING_MODE=dpo`. The training container:
+
+1. Downloads the SFT model from S3 (the output of Step 2)
+2. Loads the preference pairs from Step 3
+3. Applies fresh LoRA adapters
+4. Trains using `DPOTrainer` with `beta=0.1` for 1 epoch
+5. Merges and uploads to `s3://sridhar-models/student-1b-v24-dpo/`
+
+**Smart skip:** If fewer than 5 preference pairs were generated, DPO is skipped entirely and the SFT model passes through unchanged to deployment.
+
+**What DPO actually does:** Instead of teaching the model *what* to say (SFT), DPO teaches it to *prefer* better answers over worse ones. Given a prompt, the model learns to increase the probability of the Teacher's response and decrease the probability of its own (weaker) response. The `beta` parameter controls how aggressively it shifts -- lower beta = stronger alignment.
+
+**Why DPO over RLHF?** DPO achieves similar results without needing a separate reward model or PPO training loop. It works directly on preference pairs, making it simpler and more stable.
+
+### Step 5: Deploy Model
+
+Patches the existing KServe `InferenceService` (`student-llm`) to point at the new DPO model in S3. KServe handles the rolling update -- it spins up a new vLLM pod with the new weights and routes traffic once ready.
+
+### Step 6: Evaluate
+
+Sends 15 test questions to the deployed Student model and has the Teacher (Groq 70B) grade each response on a 1-10 scale. The questions cover:
+
+- General ML/distillation (5 questions)
+- Kubeflow Pipelines (2)
+- Training Operator (2)
+- KServe (2)
+- Katib (2)
+- Platform/multi-tenancy (2)
+
+Results are logged to MLflow with metrics like `student_avg_score`, `teacher_avg_score`, and `score_gap`. The Teacher also answers the same questions and self-grades as a baseline.
+
+---
+
+## Phase 1 Baseline (SFT Only)
+
+From the previous run (`v23`, SFT only):
+
+| Metric | Score |
+|--------|-------|
+| Student Average | **5.13/10** |
+| Teacher Average | 9.67/10 |
+| Score Gap | 4.53 |
+
+The Student struggled especially on Kubeflow-specific questions (KServe modes: 2/10, multi-tenancy: 2/10, distributed training: 2/10).
+
+**Phase 2's goal:** The DPO step should improve these scores by teaching the model to prefer detailed, accurate answers over the vague, repetitive ones it currently produces.
+
+---
+
+## Infrastructure
+
+| Component | Technology |
+|-----------|-----------|
+| Pipeline orchestration | Kubeflow Pipelines (KFP v2) on Red Hat OpenShift AI |
+| Training | Kubeflow Training Operator (TrainJob CRD) |
+| Model serving | KServe with vLLM runtime |
+| Storage | MinIO (S3-compatible) |
+| Experiment tracking | MLflow |
+| Teacher LLM | Groq API (Llama 3.3 70B) |
+| Base model | unsloth/Llama-3.2-1B-Instruct |
+| Training method | QLoRA (4-bit NF4 + LoRA r=16) |
+| DPO library | trl 0.17.0 (DPOTrainer) |
+
+---
+
+## Key Files
+
+| File | Role |
+|------|------|
+| `pipeline/pipeline.py` | Pipeline DAG definition (6 steps) |
+| `pipeline/components/extract_preferences.py` | Builds DPO preference pairs |
+| `pipeline/components/dpo_finetune.py` | Submits DPO TrainJob |
+| `pipeline/training/finetune_job.py` | Training script (SFT + DPO modes) |
+| `pipeline/training/Dockerfile` | Training container image |
+| `pipeline/components/evaluate.py` | Teacher-graded evaluation |
+| `data/kubeflow_filtered.jsonl` | 827 Kubeflow Q&A pairs (SFT data) |
+| `data/kubeflow_questions.json` | 139 questions across 16 topics (DPO source) |
+
+---
+
+## Current Run Status
+
+**Run:** `dpo-pipeline-v24` (b67ee6c6)
+
+| Step | Status | Duration |
+|------|--------|----------|
+| Resolve Version | Succeeded | 21s |
+| Extract Gold Data | Succeeded | 21s |
+| SFT Fine-Tune | Succeeded | 7m 24s |
+| Extract Preferences | Succeeded | 13m 31s |
+| DPO Fine-Tune | Running | ... |
+| Deploy Model | Pending | -- |
+| Evaluate | Pending | -- |
