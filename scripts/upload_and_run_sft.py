@@ -121,8 +121,12 @@ def compile_pipeline():
     return str(output_path)
 
 
-def submit_pipeline(yaml_path: str):
-    """Submit the compiled pipeline to KFP."""
+PIPELINE_NAME = "distillation-flywheel"
+PIPELINE_DESCRIPTION = "SFT + DPO distillation flywheel for Kubeflow domain knowledge"
+
+
+def _get_kfp_client():
+    """Build an authenticated KFP client."""
     try:
         from kfp import client as kfp_client
     except ImportError:
@@ -131,10 +135,45 @@ def submit_pipeline(yaml_path: str):
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    print(f"\nConnecting to KFP at {KFP_ENDPOINT}...")
     import subprocess
     token = subprocess.check_output(["oc", "whoami", "-t"]).decode().strip()
-    c = kfp_client.Client(host=KFP_ENDPOINT, existing_token=token, ssl_ca_cert=False, verify_ssl=False)
+    print(f"\nConnecting to KFP at {KFP_ENDPOINT}...")
+    return kfp_client.Client(
+        host=KFP_ENDPOINT, existing_token=token,
+        ssl_ca_cert=False, verify_ssl=False,
+    )
+
+
+def _ensure_pipeline(c, yaml_path: str):
+    """Upload or update the pipeline definition so it appears in the RHOAI Dashboard."""
+    version_name = f"v{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    existing = c.list_pipelines(filter=f'{{"predicates":[{{"key":"name","operation":"EQUALS","string_value":"{PIPELINE_NAME}"}}]}}')
+    if existing.pipelines:
+        pipeline_id = existing.pipelines[0].pipeline_id
+        print(f"Pipeline '{PIPELINE_NAME}' exists (id={pipeline_id}), uploading new version: {version_name}")
+        c.upload_pipeline_version(
+            pipeline_package_path=yaml_path,
+            pipeline_version_name=version_name,
+            pipeline_id=pipeline_id,
+            description=PIPELINE_DESCRIPTION,
+        )
+    else:
+        print(f"Creating pipeline '{PIPELINE_NAME}' with version: {version_name}")
+        pipeline = c.upload_pipeline(
+            pipeline_package_path=yaml_path,
+            pipeline_name=PIPELINE_NAME,
+            description=PIPELINE_DESCRIPTION,
+        )
+        pipeline_id = pipeline.pipeline_id
+    return pipeline_id
+
+
+def submit_pipeline(yaml_path: str):
+    """Upload the pipeline definition to the RHOAI Dashboard, then create a run."""
+    c = _get_kfp_client()
+
+    pipeline_id = _ensure_pipeline(c, yaml_path)
 
     params = {
         "s3_access_key": S3_ACCESS_KEY,
@@ -161,10 +200,10 @@ def main():
     parser = argparse.ArgumentParser(description="Step 1.7 — Upload data & run SFT pipeline")
     parser.add_argument(
         "action",
-        choices=["upload", "verify", "compile", "submit", "run", "all"],
+        choices=["upload", "verify", "compile", "register", "submit", "run", "all"],
         help="upload: push data to MinIO | verify: list MinIO contents | "
-             "compile: build pipeline YAML | submit: submit to KFP | "
-             "run/all: upload + compile + submit",
+             "compile: build pipeline YAML | register: upload pipeline definition only | "
+             "submit: register + start a run | run/all: upload + compile + submit",
     )
     parser.add_argument("--data", default="data/kubeflow_filtered.jsonl",
                         help="Path to filtered JSONL file")
@@ -181,6 +220,14 @@ def main():
 
     elif args.action == "compile":
         compile_pipeline()
+
+    elif args.action == "register":
+        c = _get_kfp_client()
+        yaml_path = args.yaml
+        if not Path(yaml_path).exists():
+            yaml_path = compile_pipeline()
+        _ensure_pipeline(c, yaml_path)
+        print("Pipeline definition registered (no run created)")
 
     elif args.action == "submit":
         submit_pipeline(args.yaml)
