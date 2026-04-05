@@ -1,5 +1,5 @@
 """
-KFP Component 3 — Deploy Model
+KFP Component 3 -- Deploy Model
 
 Patches the KServe InferenceService storageUri to point to the newly
 fine-tuned model, then waits for the rollout to become Ready.

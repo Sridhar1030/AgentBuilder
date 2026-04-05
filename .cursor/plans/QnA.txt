@@ -1,0 +1,457 @@
+=============================================================================
+  Code Review SLM — Q&A Clarifications
+  Reference: .cursor/plans/code_review_slm_final.plan.md
+=============================================================================
+
+
+DATA PIPELINE QUESTIONS
+=======================
+
+1. Dataset field semantics (is_negative)
+────────────────────────────────────────
+Confirmed: is_negative in ronantakizawa/github-codereview means
+"the reviewer had no substantive comment on this code change" —
+i.e., the code was clean and required no fixes. It is NOT about
+negative sentiment.
+
+Usage in the plan is correct:
+  • not is_negative  → positive examples (code that had real review
+    comments — these get Teacher-enriched into structured reviews)
+  • is_negative      → negative examples (clean code — these become
+    "No issues found" training data, teaching the SLM when NOT to flag)
+
+The plan's "51K examples where reviewers had no comment (clean code)"
+refers to the is_negative=True subset. We sample ~4,000 of those for
+training balance.
+
+
+2. Teacher enrichment throughput
+────────────────────────────────
+Numbers: ~20-30K filtered diffs × ~3-5 seconds/inference on Ollama 8B
+= 17-42 hours sequential. That's too long.
+
+Design decisions:
+  • Parallelism: YES. The script will use 8 concurrent workers
+    (asyncio + aiohttp or ThreadPoolExecutor). Ollama handles
+    concurrent requests natively. With 8 workers, wall-clock
+    drops to ~2-5 hours.
+  • Run location: ON-CLUSTER via a Kubernetes Job (or an oc run
+    one-shot pod). Running locally with port-forward adds network
+    latency per call and is fragile over hours-long runs.
+  • Checkpointing: The script writes processed results to a JSONL
+    file incrementally (append mode) and tracks processed IDs in a
+    checkpoint file. On resume, it skips already-processed examples.
+    This way a crash or timeout doesn't lose progress.
+  • Acceptable wall-clock: 2-5 hours with 8 workers is fine. This
+    is a one-time data preparation step, not part of the recurring
+    pipeline loop.
+
+
+3. comment_type usage for category balance
+──────────────────────────────────────────
+YES — use comment_type for stratified sampling. The dataset has:
+  bug, security, performance, style, suggestion
+
+Without stratification, we'd likely get ~70% "style" nits and
+~5% "security" — exactly the wrong distribution for a useful
+reviewer.
+
+Implementation: After filtering by language/quality, group by
+comment_type and sample proportionally with a floor:
+  • bug:          min 2,000  (or all if fewer)
+  • security:     min 1,500  (or all if fewer)
+  • performance:  min 2,000  (or all if fewer)
+  • style:        cap at 5,000 (downsample if more)
+  • suggestion:   min 2,000  (or all if fewer)
+
+Exact numbers will depend on what's available after language+quality
+filtering. The script will log the distribution before and after
+balancing.
+
+
+MODEL & TEMPLATE QUESTIONS
+==========================
+
+4. Chat template mismatch (Llama vs ChatML)
+────────────────────────────────────────────
+This is a real issue and here's how it works in the current code:
+
+Looking at finetune_job.py:
+  • SFTTrainer receives processing_class=tokenizer and the dataset
+    has a "text" field.
+  • When SFTTrainer sees a "text" column, it uses it DIRECTLY as
+    the training text. It does NOT auto-apply the tokenizer's
+    chat_template. The "text" field is treated as pre-formatted.
+  • The current JSONL "text" field contains Llama-style tokens:
+    <|begin_of_text|><|start_header_id|>user<|end_header_id|>...
+
+For Qwen2.5-Coder (ChatML format), the answer is (b):
+
+  → We change the "text" field in the JSONL to use ChatML tokens.
+
+This is handled entirely in prepare_code_review_data.py during data
+formatting. The script will:
+
+  1. Load the Qwen2.5-Coder tokenizer
+  2. For each training example, call tokenizer.apply_chat_template()
+     with the instruction/output messages
+  3. Write the resulting ChatML-formatted string into the "text" field
+
+Example output in JSONL:
+  {
+    "instruction": "Review the following code diff...",
+    "output": "**Issue:** Error swallowed...",
+    "text": "<|im_start|>user\nReview the following code diff...<|im_end|>\n<|im_start|>assistant\n**Issue:** Error swallowed...<|im_end|>"
+  }
+
+finetune_job.py needs ZERO changes for this — it already reads
+"text" and passes it to SFTTrainer. The format change is purely
+in the data preparation layer.
+
+For DPO in _format_pref_records(): the function already converts to
+message-dict format ({"role": "user", "content": ...}), and
+DPOTrainer applies the tokenizer's chat_template internally.
+So DPO works correctly with no code changes.
+
+
+5. Training image compatibility
+───────────────────────────────
+Current Dockerfile (distillation-trainer:v0.5.2):
+  • pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+  • transformers==4.47.0
+  • peft==0.15.2
+  • trl==0.17.0
+  • bitsandbytes>=0.46.1
+  • datasets==3.6.0
+  • accelerate==1.6.0
+
+Qwen2.5-Coder compatibility:
+  • transformers >= 4.37.0 is required. We have 4.47.0. ✅
+  • The Qwen2.5-Coder tokenizer may require "tiktoken" (for its
+    byte-level BPE). tiktoken is NOT in the current image.
+  • peft 0.15.2 supports Qwen2 model architecture. ✅
+  • trl 0.17.0 supports ChatML-based models. ✅
+
+Verdict: We LIKELY need to rebuild the image to add tiktoken.
+Rebuild to v0.6.0 with one additional line in Dockerfile:
+
+  RUN pip install --no-cache-dir \
+      transformers==4.47.0 \
+      peft==0.15.2 \
+      trl==0.17.0 \
+      "bitsandbytes>=0.46.1" \
+      datasets==3.6.0 \
+      accelerate==1.6.0 \
+      boto3 sentencepiece protobuf \
+      tiktoken
+
+We can verify locally first:
+  python -c "from transformers import AutoTokenizer; \
+    AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct')"
+
+If it works without tiktoken, skip the rebuild. If it fails, rebuild.
+Either way, we'll confirm before the first training run.
+
+
+PIPELINE ARCHITECTURE QUESTIONS
+===============================
+
+6. Data isolation — old vs. new synthetic data
+──────────────────────────────────────────────
+Looking at extract_gold.py (lines 87-113): it reads ALL objects
+under SYNTHETIC_PREFIX ("synthetic/") recursively. So uploading
+code review data to synthetic/code-review/ WILL merge it with
+the 827 Kubeflow Q&A pairs that already exist under synthetic/.
+
+Answer: (b) Change the synthetic prefix.
+
+One-line change in pipeline.py line 39:
+
+  BEFORE:  SYNTHETIC_PREFIX = "synthetic/"
+  AFTER:   SYNTHETIC_PREFIX = "synthetic/code-review/"
+
+This is clean because:
+  • Old Kubeflow data stays at synthetic/kubeflow-qbank/ (untouched)
+  • New code review data goes to synthetic/code-review/
+  • extract_gold.py reads ONLY the code-review subdirectory
+  • No code changes to extract_gold.py needed
+  • Fully reversible — change the prefix back to "synthetic/" if we
+    ever want to merge everything again
+
+
+7. Question bank equivalent for code review
+────────────────────────────────────────────
+Looking at extract_preferences.py:
+  • Source A (lines 143-188): Reads eval_results.json from MLflow.
+    Works unchanged — it just needs Student vs Teacher answers and
+    scores on the same prompt (diff in our case).
+  • Source B (lines 193-241): Reads QUESTION_BANK_S3 (questions.json)
+    and queries both Student + Teacher.
+
+For code review, Source B needs a DIFF BANK — a JSON file of held-out
+diffs stored at a new S3 path.
+
+Replace QUESTION_BANK_S3 in pipeline.py line 41:
+
+  BEFORE:  "s3://mlflow-artifacts/synthetic/kubeflow-qbank/questions.json"
+  AFTER:   "s3://mlflow-artifacts/synthetic/code-review/diff-bank.json"
+
+The diff-bank.json structure:
+
+  {
+    "all_questions": [
+      "Review the following code diff and identify any issues:\n\nFile: pkg/controller/reconciler.go\nLanguage: Go\n\n```diff\n- if err != nil {...",
+      "Review the following code diff and identify any issues:\n\nFile: utils/auth.py\nLanguage: Python\n\n```diff\n...",
+      ... (50 held-out diffs, formatted as review prompts)
+    ]
+  }
+
+The field name stays "all_questions" because extract_preferences.py
+reads that key (line 202). The content just happens to be code review
+prompts now. No code change to extract_preferences.py needed — it
+already treats each entry as a prompt string and sends it to both
+Student and Teacher.
+
+We DO keep both Source A and Source B active. Source B is especially
+valuable for DPO because it generates fresh preference pairs on diffs
+the Student hasn't seen during SFT.
+
+
+8. Model co-existence (ISVC naming)
+────────────────────────────────────
+REPLACE the existing student-llm ISVC. The Kubeflow Q&A model was a
+Phase 2 PoC — it has served its purpose and the benchmark results are
+recorded in MLflow.
+
+No new ISVC needed. deploy_model.py patches the same student-llm
+InferenceService with the new model's S3 path. The KServe rollout
+swaps the model weights automatically.
+
+If we later want both models serving simultaneously (unlikely), we
+can create a second ISVC then. For now, keeping ISVC_NAME = "student-llm"
+in pipeline.py is the simplest path.
+
+The Gradio app's endpoint stays the same
+(http://student-llm-predictor.sridharproject.svc.cluster.local:8080)
+— only the UI needs updating for diff input/review output (Track D).
+
+
+EVALUATION QUESTIONS
+====================
+
+9. 15 vs. 50 — two separate eval sets
+──────────────────────────────────────
+YES, these are two different things with different purposes:
+
+  A) 15 diffs in TEST_QUESTIONS (pipeline.py):
+     • Hardcoded in the pipeline DAG
+     • Run during EVERY pipeline execution (Step 6: Evaluate)
+     • Purpose: quick regression check and score tracking in MLflow
+     • Each diff requires: Student inference + Teacher inference +
+       Teacher grading = 3 LLM calls × 15 = 45 calls minimum
+     • Runtime: ~5-8 minutes at the end of each pipeline run
+
+  B) 50 diffs in eval-holdout (diff-bank.json):
+     • Stored on MinIO (see Q7 above)
+     • Used by extract_preferences.py (Source B) during DPO data
+       generation — both Student and Teacher review each diff and
+       the results become preference pairs
+     • Also used for offline/manual analysis and reporting
+     • Runtime: ~15-25 minutes (not blocking pipeline completion)
+
+We do NOT put all 50 in TEST_QUESTIONS. 50 × 3 LLM calls = 150 calls
+in the evaluate step would add ~20-30 minutes to every pipeline run.
+The 15 are a curated subset covering the key categories (bug, security,
+performance, style, resource management) that give a reliable signal.
+
+
+10. Grading prompt changes
+──────────────────────────
+Write a COMPLETELY NEW grading system prompt. The current GRADING_PROMPT
+in evaluate.py (line 61):
+
+  "Rate the following AI response to the given question on a scale
+   of 1 to 10, where 1 is completely wrong and 10 is perfect."
+
+This is for factual Q&A scoring. Code review grading is fundamentally
+different. New prompt:
+
+  "You are an expert code review grader. Rate the following code review
+   on a scale of 1 to 10 based on these criteria:
+   - Issue identification (did it find the real problem, not a hallucinated one?)
+   - Technical accuracy (is the explanation correct?)
+   - Actionability (is the suggestion concrete and implementable?)
+   - Severity accuracy (is the severity rating appropriate?)
+   - False positive avoidance (did it avoid flagging non-issues?)
+
+   A score of 10 means the review is expert-quality. A score of 1 means
+   it completely missed the issue or hallucinated problems.
+
+   Respond with ONLY a JSON object:
+   {"score": <number>, "reason": "<brief reason>"}"
+
+The output format stays {"score": N, "reason": "..."} so that
+evaluate.py's parsing logic (teacher_grade function) works unchanged.
+Only the system prompt text changes.
+
+This new prompt also needs to go into extract_preferences.py's
+GRADING_PROMPT (line 122) so that DPO preference pair scoring uses
+the same criteria.
+
+
+INTEGRATION QUESTIONS
+=====================
+
+11. Review API — separate service or co-located
+────────────────────────────────────────────────
+(a) A new standalone FastAPI service deployed separately.
+
+Rationale:
+  • Gradio is for interactive demo (human-facing)
+  • The API is for programmatic access (GitHub Actions, CLI, IDE)
+  • Different scaling: API needs low latency, Gradio can be relaxed
+  • The API is tiny: receive diff → format prompt → call KServe
+    → parse structured response → return JSON
+  • Single-file FastAPI app: api/server.py (~100 lines)
+  • Deployed as a lightweight Deployment + Service in the namespace
+
+But — this is Track D. For the current implementation round (Tracks
+A-C), we skip this entirely. The Gradio app serves as the manual
+testing interface during development.
+
+
+12. Multi-file PR handling
+──────────────────────────
+(b) Split per-file and send individual diffs.
+
+Rationale:
+  • The 1024-token context window constrains input size. A full PR
+    diff for 10 files would easily exceed this.
+  • GitHub review comments are per-file (and per-line), so
+    per-file review requests map naturally to GitHub's API.
+  • The GitHub Action workflow:
+      1. Get PR diff via GitHub API
+      2. Split into per-file diffs
+      3. For each file: POST /v1/review with that file's diff
+      4. Collect all responses
+      5. Post a single GitHub review with per-file inline comments
+  • Edge case: If a single file's diff exceeds ~800 tokens
+    (leaving room for prompt template), split at hunk boundaries.
+    This is a fallback, not the default.
+
+This is Track D work and will be designed when we get there.
+
+
+13. Line attribution in output
+──────────────────────────────
+LINE ATTRIBUTION IS POST-PROCESSING, not model output.
+
+The SLM is NOT trained to output specific line numbers. Here's why:
+  • The ronantakizawa/github-codereview dataset has diff_context but
+    no consistent line metadata (no "line 42" fields).
+  • Line numbers in diffs are context-dependent and shift with every
+    commit.
+  • Training the model to predict line numbers would require
+    annotated data we don't have, and the numbers would be fragile.
+
+Instead, the model outputs the code snippet it's flagging:
+  "Issue: Error swallowed — `if err != nil { log.Error(err) }`
+   should return the error."
+
+The API wrapper (Track D) does the line mapping:
+  1. Parse the input diff to extract hunk headers (@@ -a,b +c,d @@)
+  2. Build a line-number-to-content map
+  3. Match the model's referenced code snippet against diff lines
+  4. Return the matched line number in the API response
+
+The {"line": 42} in the plan's example API response schema is the
+OUTPUT of this post-processing, not something the model generates.
+
+Training prompt format DOES include the file path and language
+(useful context for the model) but NOT line numbers:
+  "Review the following code diff:
+   File: pkg/controller/reconciler.go
+   Language: Go
+   ```diff
+   - if err != nil { return err }
+   + if err != nil { log.Error(err) }
+   ```"
+
+
+SCOPE & PRIORITY QUESTIONS
+==========================
+
+14. Is Track D in scope for this round?
+────────────────────────────────────────
+NO. Tracks A-C are the deliverable for this implementation round.
+
+  Track A: Data preparation (download, filter, enrich, format, upload)
+  Track B: Pipeline config (base model, context length, eval questions)
+  Track C: First training run + benchmark results
+
+Track D (API, GitHub Action, CLI, Gradio UI update) is a follow-on
+AFTER we've validated that the model produces quality code reviews.
+There's no point building integrations around a model we haven't
+benchmarked yet.
+
+Deliverables for this round:
+  ✓ prepare_code_review_data.py (filter + enrich + format)
+  ✓ diff-bank.json (50 held-out evaluation diffs)
+  ✓ Updated pipeline.py (BASE_MODEL_ID, SYNTHETIC_PREFIX,
+    QUESTION_BANK_S3, TEST_QUESTIONS, grading prompt)
+  ✓ Updated finetune_job.py (model_max_length, DPO max_length)
+  ✓ Training image rebuild if needed (tiktoken)
+  ✓ First successful pipeline run with benchmark scores
+  ✓ Comparison: baseline Qwen2.5-Coder-1.5B vs fine-tuned
+
+
+15. Iteration expectations
+──────────────────────────
+Iteration is LIGHTWEIGHT and part of Track C, not a separate phase.
+
+After the first training run (Track C, step 10), "iterate" means:
+
+  1. Review the 50-diff benchmark results in MLflow
+  2. Break down scores by category (bug, security, performance,
+     style, reliability) — the eval results JSON has this data
+  3. Identify weak categories (e.g., "security reviews score 4/10
+     while bug reviews score 8/10")
+  4. For weak categories: go back to the filtered dataset, pull
+     more examples of that comment_type, run them through Teacher
+     enrichment, add to the training data
+  5. Re-run the pipeline (Steps 1-6)
+
+Expected iteration count: 1-2 rounds max in this phase. The goal
+is to get all categories above 6/10, not to reach perfection.
+
+The pipeline is literally designed for this flywheel pattern — each
+run generates new eval data (MLflow), which feeds into the next
+round's DPO preference extraction (Source A reads eval_results.json).
+
+If a category is fundamentally weak after 2 rounds, that becomes a
+data quality issue to address in a follow-on phase (potentially with
+a better Teacher model for that category, or supplementary datasets
+like CodeReviewQA).
+
+
+=============================================================================
+  Summary of Decisions
+=============================================================================
+
+  Q1:  is_negative = "no reviewer comment" (clean code). Plan is correct.
+  Q2:  8 concurrent workers, run on-cluster, checkpoint progress. ~2-5 hours.
+  Q3:  Stratified sampling by comment_type. Floor/cap per category.
+  Q4:  (b) Change JSONL "text" field to ChatML via tokenizer.apply_chat_template().
+  Q5:  Likely rebuild to v0.6.0 with tiktoken. Verify locally first.
+  Q6:  (b) Change SYNTHETIC_PREFIX to "synthetic/code-review/".
+  Q7:  Replace questions.json with diff-bank.json at new S3 path. Keep Source B.
+  Q8:  Replace existing student-llm ISVC. No new ISVC.
+  Q9:  Two separate sets: 15 in-pipeline (quick), 50 held-out (comprehensive).
+  Q10: Completely new grading prompt for code review criteria.
+  Q11: (a) Standalone FastAPI service. But Track D — deferred.
+  Q12: (b) Split per-file. Fallback to per-hunk for large files.
+  Q13: Post-processing. Model outputs code snippet, API maps to line number.
+  Q14: Tracks A-C only. Track D is follow-on.
+  Q15: 1-2 lightweight iterations within Track C. Not a separate phase.
+
+=============================================================================

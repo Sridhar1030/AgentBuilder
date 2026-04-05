@@ -1,6 +1,7 @@
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 RUN pip install --no-cache-dir \
+    transformers==4.47.0 \
     peft==0.15.2 \
     trl==0.17.0 \
     "bitsandbytes>=0.46.1" \
