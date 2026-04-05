@@ -96,7 +96,7 @@ def load_model_and_tokenizer(model_id: str):
     )
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.model_max_length = 512
+    tokenizer.model_max_length = 1024
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
@@ -267,7 +267,7 @@ def run_dpo(s3):
     )
     tokenizer = AutoTokenizer.from_pretrained(local_model_id)
     tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.model_max_length = 512
+    tokenizer.model_max_length = 1024
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     model = AutoModelForCausalLM.from_pretrained(
@@ -297,8 +297,8 @@ def run_dpo(s3):
         save_strategy="epoch",
         warmup_ratio=0.1,
         remove_unused_columns=False,
-        max_length=256,
-        max_prompt_length=128,
+        max_length=512,
+        max_prompt_length=256,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
     )

@@ -59,8 +59,15 @@ def evaluate(
     print(f"Test questions: {len(test_questions)}")
 
     GRADING_PROMPT = (
-        "You are an expert grader. Rate the following AI response to the given question "
-        "on a scale of 1 to 10, where 1 is completely wrong and 10 is perfect. "
+        "You are an expert code review grader. Rate the following AI-generated code review "
+        "on a scale of 1 to 10 based on these criteria:\n"
+        "- Issue identification: Did it find the real problem (not a hallucinated one)?\n"
+        "- Technical accuracy: Is the explanation correct?\n"
+        "- Actionability: Is the suggestion concrete and implementable?\n"
+        "- Severity accuracy: Is the severity rating appropriate?\n"
+        "- False positive avoidance: Did it avoid flagging non-issues?\n"
+        "A score of 1 means completely wrong or hallucinated issues. "
+        "A score of 10 means a perfect, reviewer-quality response.\n"
         'Respond with ONLY a JSON object: {"score": <number>, "reason": "<brief reason>"}'
     )
 
@@ -185,7 +192,7 @@ def evaluate(
     # Log to MLflow
     if mlflow_tracking_uri:
         mlflow.set_tracking_uri(mlflow_tracking_uri)
-        mlflow.set_experiment("Distillation-Eval-Hub")
+        mlflow.set_experiment("CodeReview-Eval-Hub")
         with mlflow.start_run(run_name=f"pipeline-eval-{model_version}"):
             mlflow.set_tag("model_version", model_version)
             mlflow.set_tag("eval_type", "pipeline_benchmark")

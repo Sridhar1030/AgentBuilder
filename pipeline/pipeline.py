@@ -31,37 +31,38 @@ NAMESPACE = "sridharproject"
 S3_ENDPOINT = "http://minio.sridharproject.svc.cluster.local:9000"
 MLFLOW_URI = "http://mlflow.sridharproject.svc.cluster.local:5000"
 ISVC_NAME = "student-llm"
-BASE_MODEL_ID = "unsloth/Llama-3.2-1B-Instruct"
+BASE_MODEL_ID = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
 
 TEACHER_BUCKET = "mlflow-artifacts"
-TEACHER_PREFIX = "teacher-interactions/"
+TEACHER_PREFIX = "code-review-interactions/"
 SYNTHETIC_BUCKET = "mlflow-artifacts"
-SYNTHETIC_PREFIX = "synthetic/"
-CURSOR_KEY = "teacher-interactions/.cursor.json"
-QUESTION_BANK_S3 = "s3://mlflow-artifacts/synthetic/kubeflow-qbank/questions.json"
+SYNTHETIC_PREFIX = "synthetic/code-review/"
+CURSOR_KEY = "code-review-interactions/.cursor.json"
+QUESTION_BANK_S3 = "s3://mlflow-artifacts/synthetic/code-review/diff-bank.json"
 
 TEST_QUESTIONS = [
-    # General ML / distillation
-    "What is knowledge distillation and why is it useful?",
-    "Explain the difference between LoRA and full fine-tuning.",
-    "How does QLoRA reduce memory usage during training?",
-    "What are the advantages of smaller language models in production?",
-    "Describe the role of a teacher model in model compression.",
-    # Kubeflow Pipelines
-    "What is a KFP component and how do you create one with the Python SDK?",
-    "How do you pass artifacts between components in a Kubeflow pipeline?",
-    # Training Operator
-    "Explain the difference between PyTorchJob and TrainJob in the Training Operator.",
-    "How do you configure multi-node distributed training with the Training Operator?",
-    # KServe
-    "How does KServe handle canary deployments for ML models?",
-    "What is the difference between Serverless and RawDeployment mode in KServe?",
-    # Katib
-    "What search algorithms does Katib support for hyperparameter tuning?",
-    "How do you define the search space for a Katib experiment?",
-    # Platform
-    "How do you set up multi-tenancy in Kubeflow using profiles?",
-    "What are the core components of a Kubeflow deployment?",
+    # Bug detection (3)
+    "Review the following code diff and identify any issues:\n\nFile: pkg/controller/job_controller.go\nLanguage: Go\n\n```diff\n@@ -189,7 +189,7 @@\n func (p *Progress) buildProgressServerCaCrtConfigMap(ctx context.Context, trainJob *trainer.TrainJob) (*corev1ac.ConfigMapApplyConfiguration, error) {\n \tsecret := &corev1.Secret{}\n \tif err := p.client.Get(ctx, secretKey, secret); err == nil {\n \t\tif _, ok := secret.Data[\"ca.crt\"]; !ok {\n-\t\t\treturn nil, fmt.Errorf(\"ca.crt not found: %w\", err)\n+\t\t\treturn nil, fmt.Errorf(\"ca.crt not found in TLS secret\")\n \t\t}\n```",
+    "Review the following code diff and identify any issues:\n\nFile: test/e2e/testdata/status_update.py\nLanguage: Python\n\n```diff\n@@ -0,0 +1,30 @@\n+import os, urllib.request\n+\n+token = open(os.environ[\"KUBEFLOW_TRAINER_SERVER_TOKEN\"]).read()\n+req = urllib.request.Request(url, method=\"POST\")\n+req.add_header(\"Authorization\", f\"Bearer {token}\")\n```",
+    "Review the following code diff and identify any issues:\n\nFile: pkg/webhooks/trainjob_webhook.go\nLanguage: Go\n\n```diff\n@@ -50,6 +50,10 @@\n+func (d *TrainJobDefaulter) Default(ctx context.Context, trainJob *trainer.TrainJob) error {\n+\tnow := metav1.Now()\n+\tfor i := range trainJob.Spec.RuntimePatches {\n+\t\ttrainJob.Spec.RuntimePatches[i].Time = &now\n+\t}\n```",
+    # Security (2)
+    "Review the following code diff and identify any issues:\n\nFile: pkg/util/cert/cert.go\nLanguage: Go\n\n```diff\n@@ -69,6 +69,12 @@\n+func SetupTLSConfig(mgr ctrl.Manager) (*tls.Config, error) {\n+\tcertWatcher, err := certwatcher.New(certDir+\"/tls.crt\", certDir+\"/tls.key\")\n+\tif err != nil { return nil, err }\n+\treturn &tls.Config{\n+\t\tGetCertificate: certWatcher.GetCertificate,\n+\t}, nil\n+}\n```",
+    "Review the following code diff and identify any issues:\n\nFile: manifests/overlays/manager/kustomization.yaml\nLanguage: YAML\n\n```diff\n@@ -3,4 +3,4 @@\n resources:\n   - ../../base/rbac\n   - ../../base/manager\n-  - ../../base/webhook\n+  # - ../../base/webhook\n```",
+    # Performance (2)
+    "Review the following code diff and identify any issues:\n\nFile: pkg/status/server.go\nLanguage: Go\n\n```diff\n@@ -100,6 +100,10 @@\n+func (s *Server) authorizeRequest(r *http.Request, namespace, name string) bool {\n+\tpod := &corev1.Pod{}\n+\tif err := s.client.Get(r.Context(), types.NamespacedName{Namespace: namespace, Name: podName}, pod); err != nil {\n+\t\treturn false\n+\t}\n```",
+    "Review the following code diff and identify any issues:\n\nFile: pkg/runtime/framework/plugins/flux/flux.go\nLanguage: Go\n\n```diff\n@@ -402,8 +406,12 @@\n+\tvar tasks int32\n+\tnodes := *trainJob.Spec.Trainer.NumNodes\n+\tif trainJob.Spec.Trainer.NumProcPerNode != nil {\n+\t\ttasks = *trainJob.Spec.Trainer.NumProcPerNode\n+\t}\n+\tflags := fmt.Sprintf(\"-N %d -n %d\", nodes, tasks)\n+\trspec := fmt.Sprintf(\"--cores=0-%d\", tasks-1)\n```",
+    # Kubernetes-specific (2)
+    "Review the following code diff and identify any issues:\n\nFile: manifests/base/webhook/manifests.yaml\nLanguage: YAML\n\n```diff\n@@ -0,0 +1,15 @@\n+apiVersion: admissionregistration.k8s.io/v1\n+kind: MutatingWebhookConfiguration\n+metadata:\n+  name: mutating-webhook-configuration\n+webhooks:\n+- clientConfig:\n+    service:\n+      name: webhook-service\n+      namespace: system\n+      path: /mutate-trainer-kubeflow-org-v1alpha1-trainjob\n```",
+    "Review the following code diff and identify any issues:\n\nFile: manifests/base/manager/controller_manager_config.yaml\nLanguage: YAML\n\n```diff\n@@ -5,4 +5,4 @@\n controller:\n   manager:\n-    leaderElect: true\n+    leaderElect: false\n   certManagement:\n-    enable: true\n+    enable: false\n```",
+    # Reliability (2)
+    "Review the following code diff and identify any issues:\n\nFile: pkg/statusserver/middleware.go\nLanguage: Go\n\n```diff\n@@ -0,0 +1,20 @@\n+func authenticationMiddleware(logger logr.Logger) Middleware {\n+\treturn func(next http.Handler) http.Handler {\n+\t\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n+\t\t\tauth := r.Header.Get(\"Authorization\")\n+\t\t\tif !strings.HasPrefix(auth, \"Bearer \") {\n+\t\t\t\thttp.Error(w, \"Invalid Authorization header format\", http.StatusUnauthorized)\n+\t\t\t\treturn\n+\t\t\t}\n+\t\t\ttoken := strings.TrimPrefix(auth, \"Bearer \")\n+\t\t\tif token == \"\" {\n+\t\t\t\thttp.Error(w, \"Empty bearer token\", http.StatusUnauthorized)\n+\t\t\t\treturn\n+\t\t\t}\n```",
+    "Review the following code diff and identify any issues:\n\nFile: pkg/runtime/framework/plugins/plainml/plainml.go\nLanguage: Go\n\n```diff\n@@ -80,6 +80,10 @@\n+\tfor i, patch := range trainJob.Spec.RuntimePatches {\n+\t\tif i < len(old.Spec.RuntimePatches) && reflect.DeepEqual(patch, old.Spec.RuntimePatches[i]) {\n+\t\t\ttrainJob.Spec.RuntimePatches[i].Time = old.Spec.RuntimePatches[i].Time\n+\t\t} else {\n+\t\t\ttrainJob.Spec.RuntimePatches[i].Time = &now\n+\t\t}\n```",
+    # Style / Refactor (2)
+    "Review the following code diff and identify any issues:\n\nFile: pkg/constants/constants.go\nLanguage: Go\n\n```diff\n@@ -114,4 +114,7 @@\n \tFluxCurveVolumePath = \"/curve\"\n \n+\t// Ensure MPI has full memory of the host\n+\tFluxMemoryVolumeName = \"dshm\"\n```",
+    "Review the following code diff and identify any issues:\n\nFile: pkg/runtime/core/trainingruntime.go\nLanguage: Go\n\n```diff\n@@ -50,6 +50,15 @@\n+func mergeRuntimePatches(jobSet *jobsetv1.JobSet, patches []trainer.RuntimePatch) {\n+\tfor _, rJobPatch := range patches {\n+\t\tfor i, rJob := range jobSet.Spec.ReplicatedJobs {\n+\t\t\tif rJob.Name == rJobPatch.TargetReplicatedJob {\n+\t\t\t\tapplyPodPatch(&jobSet.Spec.ReplicatedJobs[i].Template.Spec.Template, rJobPatch.Template.PodTemplatePatch)\n+\t\t\t}\n+\t\t}\n+\t}\n+}\n```",
+    # Clean code / negative examples (2)
+    "Review the following code diff and identify any issues:\n\nFile: pkg/features/features.go\nLanguage: Go\n\n```diff\n@@ -30,6 +30,13 @@\n+const (\n+\tTrainJobRuntimeStatus featuregate.Feature = \"TrainJobRuntimeStatus\"\n+)\n+\n+var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{\n+\tTrainJobRuntimeStatus: {Default: false, PreRelease: featuregate.Alpha},\n+}\n```",
+    "Review the following code diff and identify any issues:\n\nFile: charts/kubeflow-trainer/values.yaml\nLanguage: YAML\n\n```diff\n@@ -138,6 +138,13 @@\n+    statusServer:\n+      # -- Port that the TrainJob status server serves on.\n+      port: 10443\n+      # -- QPS rate limit for the TrainJob Status Server api client\n+      qps: 5\n+      # -- Burst rate limit for the TrainJob Status Server api client\n+      burst: 10\n```",
 ]
 
 
@@ -74,7 +75,7 @@ def distillation_pipeline(
     s3_access_key: str = "minioadmin",
     s3_secret_key: str = "minioadmin123",
     teacher_api_url: str = "http://ollama.sridharproject.svc.cluster.local:11434",
-    teacher_model: str = "llama3.1:8b-instruct-q4_K_M",
+    teacher_model: str = "qwen2.5-coder:7b-instruct-q4_K_M",
     teacher_api_key: str = "",
     num_epochs: int = 3,
     dpo_epochs: int = 1,
@@ -89,7 +90,7 @@ def distillation_pipeline(
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,
         model_bucket="sridhar-models",
-        model_prefix="student-1b-",
+        model_prefix="code-review-1.5b-",
         gold_bucket=TEACHER_BUCKET,
         explicit_version=model_version,
     )
