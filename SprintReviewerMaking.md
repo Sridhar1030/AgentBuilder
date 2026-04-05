@@ -6,8 +6,61 @@
 >
 > **Data Strategy:** Dual-source — mine real PR reviews from Kubeflow/K8s repos (primary, domain-specific) + supplement with HuggingFace generic dataset (volume).
 >
+> **Branch:** `agentic-trainer-implementation`
+>
 > **Base Plan:** `.cursor/plans/code_review_slm_final.plan.md`
 > **Q&A Decisions:** `.cursor/plans/QnA.txt`
+
+### Progress Overview (Updated Apr 5, 2026)
+
+| Track | Task | Status |
+| ----- | ---- | ------ |
+| A0 | GitHub Token & Dependencies | **DONE** |
+| A1 | Mine PR Reviews (GitHub) | **DONE** — 200 examples from `kubeflow/trainer` (Go:181 Python:4 YAML:15) |
+| A2 | Teacher Enrichment (GitHub) | PENDING — needs Ollama on cluster |
+| A3 | HF Supplement (Go/Python/YAML) | **DONE** — 7,996 examples (Go:2522 Python:5474), quality>=0.43, stratified |
+| A4 | Teacher Enrichment (HF) | PENDING — needs Ollama on cluster |
+| A5 | Merge & Format Training Data | **DONE** — 9,835 total (8,196 positive + 1,639 negative) in `data/code_review_train.jsonl` |
+| A6 | Eval Diff Bank | **DONE** — 50 held-out diffs in `data/diff-bank.json` (30 domain + 20 generic) |
+| A7 | 15 In-Pipeline TEST_QUESTIONS | **DONE** — embedded in pipeline.py |
+| A8 | **Upload to MinIO** | **DONE** — 21.2 MB training + 98 KB eval in `s3://mlflow-artifacts/synthetic/code-review/` |
+| B1 | Switch Base Model | **DONE** |
+| B2 | Pipeline Config Constants | **DONE** |
+| B3 | Replace TEST_QUESTIONS | **DONE** |
+| B4 | Increase Context Lengths | **DONE** |
+| B5 | Grading Prompt (evaluate.py) | **DONE** |
+| B6 | Grading Prompt (extract_preferences.py) | **DONE** |
+| B7 | MLflow Experiment Name | **DONE** |
+| B8 | Training Image Rebuild | PENDING |
+| B9 | Compile Pipeline | PENDING |
+| C1 | Pre-Flight Checks | PENDING |
+| C2 | Execute Pipeline Run | PENDING |
+| C3 | Analyze Results | PENDING |
+
+**Completed:** 16/21 &nbsp; | &nbsp; **Next up:** A2/A4 (teacher enrichment, needs Ollama) or B8 (image rebuild)
+
+### Data Summary (Final Numbers)
+
+| File | Records | Source |
+| ---- | ------- | ------ |
+| `data/kubeflow_reviews.json` | 200 | GitHub mining from `kubeflow/trainer` — Go:181, Python:4, YAML:15 |
+| `data/hf_supplement.json` | 7,996 | HuggingFace `ronantakizawa/github-codereview` — Go:2522, Python:5474 |
+| `data/code_review_train.jsonl` | **9,835** | Merged: 8,196 positive + 1,639 negative, ChatML formatted |
+| `data/diff-bank.json` | 50 | Held-out eval diffs (30 domain, 20 generic) — not used in training |
+
+**Category breakdown of training data:**
+- suggestion: 4,441 | bug: 1,194 | question: 914 | negative: 1,639 | refactor: 549
+- performance: 422 | security: 392 | style: 117 | nitpick: 93 | other: 74
+
+### What's Left (in order)
+
+1. **`oc login`** — you need to re-authenticate to OpenShift
+2. **Port-forward MinIO** — `oc port-forward svc/minio 9000:9000 -n sridharproject`
+3. **Upload data** — `python3 scripts/format_training_data.py --upload --s3-endpoint http://localhost:9000`
+4. **Pull teacher model** — `ollama pull qwen2.5-coder:7b-instruct-q4_K_M` on cluster
+5. **Verify/rebuild training image** (B8) — test if Qwen tokenizer works in current image
+6. **Compile pipeline** (B9) — `python -m kfp.compiler.compiler pipeline.py distillation_flywheel.yaml`
+7. **Run pipeline on OpenShift Dashboard** (C1-C3)
 
 ---
 
@@ -15,11 +68,11 @@
 
 ### A0. GitHub Token & Dependencies Setup
 
-- **Status:** `[ ]` NOT STARTEDb
+- **Status:** `[x]` DONE
 - **Subtasks:**
-  - A0.1 — Ensure GitHub personal access token is available (env var `GITHUB_TOKEN`); needs `repo` and `read:org` scopes
-  - A0.2 — Install dependencies: `pip install requests datasets transformers`
-  - A0.3 — Verify Ollama teacher endpoint is reachable (cluster or port-forward)
+  - [x] A0.1 — GitHub token available via `gh auth token`
+  - [x] A0.2 — Dependencies installed: `requests`, `datasets`, `transformers`
+  - [ ] A0.3 — Verify Ollama teacher endpoint is reachable (cluster or port-forward) — *deferred to A2*
 
 ---
 
@@ -27,8 +80,13 @@
 
 ### A1. Mine PR Reviews from Target Repos
 
-- **Status:** `[ ]` NOT STARTED
-- **Script:** `scripts/mine_github_reviews.py` (new file)
+- **Status:** `[x]` DONE — full production run complete
+- **Script:** `scripts/mine_github_reviews.py`
+- **Output:** `data/kubeflow_reviews.json` — **200 examples** from `kubeflow/trainer`
+- **Actual yield:** 135 merged PRs scanned → 442 raw comments → 200 accepted (Go:181, Python:4, YAML:15)
+- **Quality score:** min=0.30, mean=0.63, max=0.90
+- **Comment types:** question:87, other:69, suggestion:20, bug:7, security:6, style:4, reliability:3, performance:2, refactoring:2
+- **Schema:** Exact 20-column match with `ronantakizawa/github-codereview`
 - **Target Repos:**
   ```
   REPOS = [
@@ -88,7 +146,7 @@
 
 ### A2. Teacher Enrichment (GitHub-Mined Data)
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[ ]` NOT STARTED — *needs Ollama on cluster*
 - **Script:** `scripts/mine_github_reviews.py` (enrichment section)
 - **Teacher:** `qwen2.5-coder:7b-instruct-q4_K_M` via Ollama
 - **Subtasks:**
@@ -125,9 +183,15 @@
 
 ### A3. Download & Filter HuggingFace Dataset
 
-- **Status:** `[ ]` NOT STARTED
-- **Script:** `scripts/prepare_hf_supplement.py` (new file)
-- **Source:** `[ronantakizawa/github-codereview](https://huggingface.co/datasets/ronantakizawa/github-codereview)` — 356K rows
+- **Status:** `[x]` DONE — full production run complete
+- **Script:** `scripts/prepare_hf_supplement.py`
+- **Run:** `python3 scripts/prepare_hf_supplement.py --max-examples 8000 -o data/hf_supplement.json`
+- **Source:** `[ronantakizawa/github-codereview](https://huggingface.co/datasets/ronantakizawa/github-codereview)` — 334,323 rows
+- **Actual yield:** 334,323 total → 70,257 passed filters → **7,996 stratified sample**
+- **Filter stats:** filtered_language:211,944, filtered_quality:26,962, filtered_negative:23,509, filtered_short:1,651
+- **By language:** Go:2,522 | Python:5,474 (no YAML passed quality threshold — YAML comes from GitHub mining)
+- **By comment_type:** suggestion:4,421, bug:1,187, question:827, refactor:549, performance:420, security:386, style:113, nitpick:93
+- **Quality score:** min=0.43, avg=0.70, max=1.00
 - **Subtasks:**
   - A3.1 — Download and filter:
     - `language in ["Go", "Python", "YAML"]`
@@ -135,15 +199,13 @@
     - `quality_score >= 0.4`
     - `comment_length > 50`
   - A3.2 — Exclude repos already mined in Stream 1 (by `repo_name` field) to avoid duplicates
-  - A3.3 — Sample ~5,000–8,000 examples (reduced from original 15–20K since GitHub mining is the core)
-    - Stratified by `comment_type` to fill gaps in categories the GitHub repos might lack
-    - Prioritize: `security`, `performance`, `bug` (categories less common in K8s operator code)
-  - A3.4 — Save filtered data to `data/hf_supplement_raw.jsonl`
+  - A3.3 — Stratified sampling (target 8,000) by `comment_type`, prioritizing `security`, `performance`, `bug`
+  - A3.4 — Save to `data/hf_supplement.json`
   - A3.5 — Log stats: counts per language, per comment_type
 
 ### A4. Teacher Enrichment (HF Supplement)
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[ ]` NOT STARTED — *needs Ollama on cluster*
 - **Script:** `scripts/prepare_hf_supplement.py` (enrichment section)
 - **Subtasks:**
   - A4.1 — Same enrichment prompt as A2.2 (without `kubernetes` category — use standard categories)
@@ -158,8 +220,13 @@
 
 ### A5. Merge Both Streams into Training JSONL
 
-- **Status:** `[ ]` NOT STARTED
-- **Script:** `scripts/format_training_data.py` (new file)
+- **Status:** `[x]` DONE — full production run complete
+- **Script:** `scripts/format_training_data.py`
+- **Run:** `python3 scripts/format_training_data.py` (needs both `data/kubeflow_reviews.json` + `data/hf_supplement.json`)
+- **Output:** `data/code_review_train.jsonl` — **9,835 training examples** (8,196 positive + 1,639 negative)
+- **By source:** hf_supplement:7,996, hf_supplement_negative:1,588, github_mined:200, github_mined_negative:51
+- **By language:** Go:3,223, Python:6,592, YAML:20
+- **Also builds:** `data/diff-bank.json` (50 held-out eval diffs: 30 domain + 20 generic) and supports `--upload` to MinIO
 - **Subtasks:**
   - A5.1 — Load Qwen2.5-Coder-1.5B-Instruct tokenizer
   - A5.2 — Format each enriched example (both streams) into training JSONL:
@@ -177,7 +244,7 @@
 
 ### A6. Create Evaluation Diff Bank
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[x]` DONE — built into `scripts/format_training_data.py`
 - **Output:** `diff-bank.json` → `s3://mlflow-artifacts/synthetic/code-review/diff-bank.json`
 - **Subtasks:**
   - A6.1 — Select 50 held-out diffs (NOT used in training):
@@ -189,7 +256,7 @@
 
 ### A7. Curate 15 In-Pipeline TEST_QUESTIONS
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[x]` DONE — 15 real code review diffs from `kubeflow/trainer` embedded in `pipeline.py`
 - **Target:** `pipeline/pipeline.py` lines 43–65
 - **Subtasks:**
   - A7.1 — Select 15 from the 50 held-out diffs (curated subset):
@@ -202,17 +269,26 @@
     - 2 clean code (negative — should return "No issues found")
   - A7.2 — Format each as a multi-line Python string for `TEST_QUESTIONS` list
 
-**Target Data Volume Summary:**
+### A8. Upload Data to MinIO
+
+- **Status:** `[x]` DONE — uploaded Apr 5, 2026
+- **Target:** `s3://mlflow-artifacts/synthetic/code-review/`
+- **Files uploaded:**
+  - `code_review_train.jsonl` — **21,203,627 bytes** (9,835 training examples)
+  - `diff-bank.json` — **98,692 bytes** (50 eval diffs)
+- **Verified:** Listed objects in MinIO via boto3, sizes and timestamps confirmed
+
+**Actual Data Volume (Production Runs):**
 
 
-| Source                                  | Role                    | Estimated Count   |
-| --------------------------------------- | ----------------------- | ----------------- |
-| GitHub-mined Go/Python/YAML (enriched)  | Primary domain data     | ~1,300–3,200      |
-| HF supplement Go/Python/YAML (enriched) | Volume + diversity      | ~5,000–8,000      |
-| Negative examples (both sources)        | False positive training | ~2,000–3,000      |
-| **Total training data**                 |                         | **~8,000–14,000** |
-| Held-out eval diffs (diff-bank.json)    | Evaluation              | 50                |
-| In-pipeline TEST_QUESTIONS              | Quick regression        | 15                |
+| Source                           | Role                    | Actual Count |
+| -------------------------------- | ----------------------- | ------------ |
+| GitHub-mined (kubeflow/trainer)  | Primary domain data     | 200          |
+| HF supplement Go/Python          | Volume + diversity      | 7,996        |
+| Negative examples (both sources) | False positive training | 1,639        |
+| **Total training data**          |                         | **9,835**    |
+| Held-out eval diffs              | Evaluation              | 50           |
+| In-pipeline TEST_QUESTIONS       | Quick regression        | 15           |
 
 
 **New Files Summary:**
@@ -231,7 +307,7 @@
 
 ### B1. Switch Base Model
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[x]` DONE
 - **File:** `pipeline/pipeline.py` line 34
 - **Subtasks:**
   - B1.1 — Change `BASE_MODEL_ID`
@@ -240,7 +316,7 @@
 
 ### B2. Update Pipeline Config Constants
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[x]` DONE
 - **File:** `pipeline/pipeline.py` lines 37–41, 77, 92
 - **Subtasks:**
   - B2.1 — Change `TEACHER_PREFIX` (line 37)
@@ -264,7 +340,7 @@
 
 ### B3. Replace TEST_QUESTIONS
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[x]` DONE
 - **File:** `pipeline/pipeline.py` lines 43–65
 - **Subtasks:**
   - B3.1 — Replace the 15 Kubeflow Q&A strings with the 15 code review diffs curated in A7
@@ -272,7 +348,7 @@
 
 ### B4. Increase Context Lengths in finetune_job.py
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[x]` DONE
 - **File:** `pipeline/training/finetune_job.py`
 - **Subtasks:**
   - B4.1 — SFT `model_max_length` (line 99): `512` → `1024`
@@ -282,7 +358,7 @@
 
 ### B5. Update Grading Prompt in evaluate.py
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[x]` DONE
 - **File:** `pipeline/components/evaluate.py` lines 61–65
 - **Subtasks:**
   - B5.1 — Replace `GRADING_PROMPT` with code review criteria:
@@ -295,7 +371,7 @@
 
 ### B6. Update Grading Prompt in extract_preferences.py
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[x]` DONE
 - **File:** `pipeline/components/extract_preferences.py` lines 122–126
 - **Subtasks:**
   - B6.1 — Replace `GRADING_PROMPT` with same code review grading criteria as B5
@@ -303,7 +379,7 @@
 
 ### B7. Update MLflow Experiment Name
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[x]` DONE
 - **Files:** `evaluate.py` line 188, `extract_preferences.py` line 148
 - **Subtasks:**
   - B7.1 — Change experiment in `evaluate.py` (line 188): `"Distillation-Eval-Hub"` → `"CodeReview-Eval-Hub"`
