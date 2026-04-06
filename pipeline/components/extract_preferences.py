@@ -46,6 +46,18 @@ def extract_preferences(
     import mlflow
     import requests
 
+    print("=" * 60)
+    print("EXTRACT PREFERENCE PAIRS STEP")
+    print("=" * 60)
+    print(f"  Student URL:   {student_url}")
+    print(f"  Teacher API:   {teacher_api_url}")
+    print(f"  Teacher model: {teacher_model}")
+    print(f"  Question bank: {question_bank_s3_path}")
+    print(f"  Version:       {model_version}")
+    print(f"  Min score gap: {min_score_gap}")
+    print(f"  Max supplement: {max_supplement_questions}")
+    print("=" * 60)
+
     if mlflow_tracking_uri.startswith("https://"):
         os.environ.setdefault("MLFLOW_TRACKING_INSECURE_TLS", "true")
     if s3_endpoint:

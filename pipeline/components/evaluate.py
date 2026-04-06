@@ -53,10 +53,16 @@ def evaluate(
     if teacher_api_key:
         api_headers["Authorization"] = f"Bearer {teacher_api_key}"
 
-    print(f"Student URL: {student_url}")
-    print(f"Teacher API: {api_url}")
-    print(f"Teacher model: {teacher_model}")
-    print(f"Test questions: {len(test_questions)}")
+    print("=" * 60)
+    print("EVALUATE MODEL STEP")
+    print("=" * 60)
+    print(f"  Student URL:   {student_url}")
+    print(f"  Teacher API:   {api_url}")
+    print(f"  Teacher model: {teacher_model}")
+    print(f"  Model version: {model_version}")
+    print(f"  Questions:     {len(test_questions)}")
+    print(f"  MLflow URI:    {mlflow_tracking_uri or '(not set)'}")
+    print("=" * 60)
 
     GRADING_PROMPT = (
         "You are an expert code review grader. Rate the following AI-generated code review "

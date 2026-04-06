@@ -36,6 +36,15 @@ def resolve_version(
     from collections import namedtuple
     import boto3
 
+    print("=" * 60)
+    print("RESOLVE VERSION STEP")
+    print("=" * 60)
+    print(f"  Model bucket: {model_bucket}")
+    print(f"  Model prefix: {model_prefix}")
+    print(f"  Gold bucket:  {gold_bucket}")
+    print(f"  Explicit ver: {explicit_version or '(auto)'}")
+    print("=" * 60)
+
     s3 = boto3.client(
         "s3",
         endpoint_url=s3_endpoint,

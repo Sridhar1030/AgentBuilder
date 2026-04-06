@@ -27,6 +27,7 @@ import os
 import shutil
 
 import boto3
+import mlflow  # mlflow-skinny at runtime
 import torch
 from datasets import Dataset
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
@@ -39,6 +40,14 @@ def get_env(key: str, default: str = None) -> str:
     if val is None:
         raise ValueError(f"Required environment variable {key} is not set")
     return val
+
+
+def local_rank() -> int:
+    return int(os.environ.get("LOCAL_RANK", 0))
+
+
+def is_main_process() -> bool:
+    return local_rank() == 0
 
 
 def build_s3_client():
@@ -87,7 +96,11 @@ def upload_model_to_s3(s3, output_dir: str, model_output_s3_path: str):
 
 
 def load_model_and_tokenizer(model_id: str):
-    """Load a model in 4-bit QLoRA mode with tokenizer."""
+    """Load a model in 4-bit QLoRA mode with tokenizer.
+
+    Uses LOCAL_RANK so each DDP process loads onto its own GPU.
+    """
+    rank = local_rank()
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -97,18 +110,21 @@ def load_model_and_tokenizer(model_id: str):
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.model_max_length = 1024
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         quantization_config=bnb_config,
-        device_map={"": 0},
+        device_map={"": rank},
     )
     model = prepare_model_for_kbit_training(model)
+    print(f"[Rank {rank}] Model loaded on GPU {rank}")
     return model, tokenizer
 
 
 def merge_and_save(model, base_model_id: str, output_dir: str):
-    """Save LoRA adapter, reload full-precision base, merge, patch tokenizer."""
+    """Save LoRA adapter, reload full-precision base, merge, patch tokenizer.
+
+    Only called from rank 0.
+    """
     adapter_dir = "/tmp/lora-adapter"
     print("Saving LoRA adapter...")
     model.save_pretrained(adapter_dir)
@@ -120,7 +136,7 @@ def merge_and_save(model, base_model_id: str, output_dir: str):
     base_model = AutoModelForCausalLM.from_pretrained(
         base_model_id,
         torch_dtype=torch.float16,
-        device_map={"": 0},
+        device_map="cpu",
     )
     peft_model = PeftModel.from_pretrained(base_model, adapter_dir)
     merged_model = peft_model.merge_and_unload()
@@ -146,6 +162,19 @@ def merge_and_save(model, base_model_id: str, output_dir: str):
 # =========================================================================
 # SFT Training
 # =========================================================================
+
+def setup_mlflow(mode: str):
+    """Configure MLflow tracking if the URI is available."""
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "")
+    if not tracking_uri:
+        tracking_uri = "http://mlflow.sridharproject.svc.cluster.local:5000"
+    mlflow.set_tracking_uri(tracking_uri)
+    experiment_name = "CodeReview-Training"
+    mlflow.set_experiment(experiment_name)
+    os.environ["MLFLOW_TRACKING_URI"] = tracking_uri
+    os.environ["HF_MLFLOW_LOG_ARTIFACTS"] = "false"
+    print(f"MLflow tracking: {tracking_uri}, experiment: {experiment_name}, mode: {mode}")
+
 
 def run_sft(s3):
     gold_data_path = get_env("GOLD_DATA_PATH")
@@ -174,16 +203,23 @@ def run_sft(s3):
     )
     model = get_peft_model(model, lora_config)
 
+    setup_mlflow("sft")
+
     training_args = SFTConfig(
         output_dir="/tmp/sft-checkpoints",
         num_train_epochs=num_epochs,
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=4,
         learning_rate=learning_rate,
-        fp16=False,
-        logging_steps=1,
+        fp16=True,
+        logging_steps=10,
         save_strategy="epoch",
         warmup_ratio=0.1,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        ddp_find_unused_parameters=False,
+        report_to=["mlflow"],
+        run_name=f"sft-{base_model_id.split('/')[-1]}-{num_epochs}ep",
     )
 
     trainer = SFTTrainer(
@@ -196,9 +232,19 @@ def run_sft(s3):
     print("Starting SFT QLoRA fine-tuning...")
     trainer.train()
 
-    output_dir = "/tmp/student-merged"
-    merge_and_save(model, base_model_id, output_dir)
-    upload_model_to_s3(s3, output_dir, model_output_s3_path)
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+    if is_main_process():
+        output_dir = "/tmp/student-merged"
+        merge_and_save(model, base_model_id, output_dir)
+        upload_model_to_s3(s3, output_dir, model_output_s3_path)
+    else:
+        print(f"[Rank {local_rank()}] Training done. Waiting for rank 0 to merge & upload.")
+
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+        print(f"[Rank {local_rank()}] All ranks synced. Exiting.")
 
 
 # =========================================================================
@@ -265,16 +311,17 @@ def run_dpo(s3):
         bnb_4bit_compute_dtype=torch.float16,
         bnb_4bit_use_double_quant=True,
     )
+    rank = local_rank()
     tokenizer = AutoTokenizer.from_pretrained(local_model_id)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.model_max_length = 1024
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     model = AutoModelForCausalLM.from_pretrained(
         local_model_id,
         quantization_config=bnb_config,
-        device_map={"": 0},
+        device_map={"": rank},
     )
+    print(f"[Rank {rank}] DPO model loaded on GPU {rank}")
 
     lora_config = LoraConfig(
         r=lora_r,
@@ -284,6 +331,8 @@ def run_dpo(s3):
         bias="none",
         task_type="CAUSAL_LM",
     )
+
+    setup_mlflow("dpo")
 
     dpo_args = DPOConfig(
         output_dir="/tmp/dpo-checkpoints",
@@ -301,6 +350,9 @@ def run_dpo(s3):
         max_prompt_length=256,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
+        ddp_find_unused_parameters=False,
+        report_to=["mlflow"],
+        run_name=f"dpo-beta{dpo_beta}-{num_epochs}ep",
     )
 
     # Let DPOTrainer handle PEFT via peft_config (don't apply get_peft_model manually).
@@ -318,39 +370,49 @@ def run_dpo(s3):
     print(f"Starting DPO training (beta={dpo_beta})...")
     trainer.train()
 
-    output_dir = "/tmp/student-dpo-merged"
-    print("Saving DPO adapter and merging...")
-    trainer.save_model("/tmp/dpo-adapter")
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
 
-    del trainer
-    torch.cuda.empty_cache()
+    if is_main_process():
+        output_dir = "/tmp/student-dpo-merged"
+        print("Saving DPO adapter and merging...")
+        trainer.save_model("/tmp/dpo-adapter")
 
-    base_model = AutoModelForCausalLM.from_pretrained(
-        local_model_id,
-        torch_dtype=torch.float16,
-        device_map={"": 0},
-    )
-    peft_model = PeftModel.from_pretrained(base_model, "/tmp/dpo-adapter")
-    merged_model = peft_model.merge_and_unload()
-    print("DPO LoRA merged into full-precision model")
-    merged_model.save_pretrained(output_dir)
+        del trainer
+        torch.cuda.empty_cache()
 
-    clean_tokenizer = AutoTokenizer.from_pretrained(local_model_id)
-    clean_tokenizer.save_pretrained(output_dir)
+        base_model = AutoModelForCausalLM.from_pretrained(
+            local_model_id,
+            torch_dtype=torch.float16,
+            device_map="cpu",
+        )
+        peft_model = PeftModel.from_pretrained(base_model, "/tmp/dpo-adapter")
+        merged_model = peft_model.merge_and_unload()
+        print("DPO LoRA merged into full-precision model")
+        merged_model.save_pretrained(output_dir)
 
-    tc_path = os.path.join(output_dir, "tokenizer_config.json")
-    with open(tc_path, "r") as f:
-        tc = json.load(f)
-    removed = []
-    for field in ["tokenizer_class", "auto_map"]:
-        if field in tc:
-            removed.append(f"{field}={tc.pop(field)}")
-    if removed:
-        with open(tc_path, "w") as f:
-            json.dump(tc, f, indent=2)
-        print(f"Patched tokenizer_config.json: removed {removed}")
+        clean_tokenizer = AutoTokenizer.from_pretrained(local_model_id)
+        clean_tokenizer.save_pretrained(output_dir)
 
-    upload_model_to_s3(s3, output_dir, model_output_s3_path)
+        tc_path = os.path.join(output_dir, "tokenizer_config.json")
+        with open(tc_path, "r") as f:
+            tc = json.load(f)
+        removed = []
+        for field in ["tokenizer_class", "auto_map"]:
+            if field in tc:
+                removed.append(f"{field}={tc.pop(field)}")
+        if removed:
+            with open(tc_path, "w") as f:
+                json.dump(tc, f, indent=2)
+            print(f"Patched tokenizer_config.json: removed {removed}")
+
+        upload_model_to_s3(s3, output_dir, model_output_s3_path)
+    else:
+        print(f"[Rank {local_rank()}] DPO done. Waiting for rank 0 to merge & upload.")
+
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+        print(f"[Rank {local_rank()}] All ranks synced. Exiting.")
 
 
 # =========================================================================
@@ -359,7 +421,9 @@ def run_dpo(s3):
 
 def main():
     training_mode = get_env("TRAINING_MODE", "sft")
-    print(f"Training mode: {training_mode}")
+    rank = local_rank()
+    n_gpus = torch.cuda.device_count()
+    print(f"Training mode: {training_mode} | Rank: {rank} | GPUs visible: {n_gpus}")
 
     s3 = build_s3_client()
 

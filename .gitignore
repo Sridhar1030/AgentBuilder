@@ -81,4 +81,4 @@ venv/
 venv311/
 *.jsonl
 mlflow.db
-taskDone.txt
+taskDone.txtextension/

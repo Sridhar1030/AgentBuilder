@@ -11,15 +11,15 @@
 > **Base Plan:** `.cursor/plans/code_review_slm_final.plan.md`
 > **Q&A Decisions:** `.cursor/plans/QnA.txt`
 
-### Progress Overview (Updated Apr 5, 2026)
+### Progress Overview (Updated Apr 6, 2026)
 
 | Track | Task | Status |
 | ----- | ---- | ------ |
 | A0 | GitHub Token & Dependencies | **DONE** |
 | A1 | Mine PR Reviews (GitHub) | **DONE** — 200 examples from `kubeflow/trainer` (Go:181 Python:4 YAML:15) |
-| A2 | Teacher Enrichment (GitHub) | PENDING — needs Ollama on cluster |
+| A2 | Teacher Enrichment (GitHub) | **DONE** — 200/200 enriched locally via `qwen2.5-coder:7b` in 56 min |
 | A3 | HF Supplement (Go/Python/YAML) | **DONE** — 7,996 examples (Go:2522 Python:5474), quality>=0.43, stratified |
-| A4 | Teacher Enrichment (HF) | PENDING — needs Ollama on cluster |
+| A4 | Teacher Enrichment (HF) | **SKIPPED** — raw HF comments already decent quality; DPO will refine |
 | A5 | Merge & Format Training Data | **DONE** — 9,835 total (8,196 positive + 1,639 negative) in `data/code_review_train.jsonl` |
 | A6 | Eval Diff Bank | **DONE** — 50 held-out diffs in `data/diff-bank.json` (30 domain + 20 generic) |
 | A7 | 15 In-Pipeline TEST_QUESTIONS | **DONE** — embedded in pipeline.py |
@@ -31,13 +31,17 @@
 | B5 | Grading Prompt (evaluate.py) | **DONE** |
 | B6 | Grading Prompt (extract_preferences.py) | **DONE** |
 | B7 | MLflow Experiment Name | **DONE** |
-| B8 | Training Image Rebuild | PENDING |
-| B9 | Compile Pipeline | PENDING |
+| B8 | Training Image Rebuild | **DONE** — `v0.7.0` built (linux/amd64) + pushed to `quay.io/rh-ee-srpillai/distillation-trainer:v0.7.0` (adds `mlflow-skinny` for training metrics logging) |
+| B8.5 | Update Image Tags | **DONE** — `finetune.py` + `dpo_finetune.py` → `v0.7.0` |
+| B9 | Compile Pipeline | **DONE** — `code_review_pipeline.yaml` re-compiled with `v0.7.0` image |
+| B10 | KServe ISVC for Code Review | **DONE** — `code-review-llm` InferenceService created in `sridharproject` |
+| B11 | Add Structured Logging to All KFP Components | **DONE** — all 7 components have clear banner logs, timestamps, human-readable elapsed times |
+| B12 | MLflow Training Metrics | **DONE** — `finetune_job.py` logs SFT/DPO training loss to `CodeReview-Training` experiment |
 | C1 | Pre-Flight Checks | PENDING |
 | C2 | Execute Pipeline Run | PENDING |
 | C3 | Analyze Results | PENDING |
 
-**Completed:** 16/21 &nbsp; | &nbsp; **Next up:** A2/A4 (teacher enrichment, needs Ollama) or B8 (image rebuild)
+**Completed:** 24/27 &nbsp; | &nbsp; **Next:** C1 pre-flight checks → C2 pipeline run → C3 analyze results
 
 ### Data Summary (Final Numbers)
 
@@ -54,13 +58,9 @@
 
 ### What's Left (in order)
 
-1. **`oc login`** — you need to re-authenticate to OpenShift
-2. **Port-forward MinIO** — `oc port-forward svc/minio 9000:9000 -n sridharproject`
-3. **Upload data** — `python3 scripts/format_training_data.py --upload --s3-endpoint http://localhost:9000`
-4. **Pull teacher model** — `ollama pull qwen2.5-coder:7b-instruct-q4_K_M` on cluster
-5. **Verify/rebuild training image** (B8) — test if Qwen tokenizer works in current image
-6. **Compile pipeline** (B9) — `python -m kfp.compiler.compiler pipeline.py distillation_flywheel.yaml`
-7. **Run pipeline on OpenShift Dashboard** (C1-C3)
+1. **C1 — Pre-flight checks** — verify teacher model, data in MinIO, image accessible, ISVCs healthy
+2. **C2 — Upload `code_review_pipeline.yaml`** to RHOAI Dashboard and trigger a pipeline run
+3. **C3 — Monitor & analyze** — watch each step, review MLflow `CodeReview-Eval-Hub` metrics
 
 ---
 
@@ -146,12 +146,13 @@
 
 ### A2. Teacher Enrichment (GitHub-Mined Data)
 
-- **Status:** `[ ]` NOT STARTED — *needs Ollama on cluster*
-- **Script:** `scripts/mine_github_reviews.py` (enrichment section)
-- **Teacher:** `qwen2.5-coder:7b-instruct-q4_K_M` via Ollama
+- **Status:** `[x]` DONE — 200/200 enriched locally via `qwen2.5-coder:7b` in 56 minutes
+- **Script:** `scripts/enrich_with_teacher.py` (new script with checkpoint/resume, parallel workers)
+- **Teacher:** `qwen2.5-coder:7b-instruct-q4_K_M` via local Ollama (also pulled on cluster)
+- **Output:** `data/kubeflow_reviews_enriched.json` — structured reviews (Issue/Why/Severity/Category/Suggestion)
 - **Subtasks:**
-  - A2.1 — Pull teacher model on cluster: `ollama pull qwen2.5-coder:7b-instruct-q4_K_M`
-  - A2.2 — Write enrichment function with prompt:
+  - A2.1 — Pull teacher model: done locally + on cluster
+  - A2.2 — Enrichment function with prompt:
     ```
     You are a senior Kubernetes and Go code reviewer.
     Given this diff and the original reviewer's comment, create a structured review.
@@ -205,14 +206,10 @@
 
 ### A4. Teacher Enrichment (HF Supplement)
 
-- **Status:** `[ ]` NOT STARTED — *needs Ollama on cluster*
-- **Script:** `scripts/prepare_hf_supplement.py` (enrichment section)
-- **Subtasks:**
-  - A4.1 — Same enrichment prompt as A2.2 (without `kubernetes` category — use standard categories)
-  - A4.2 — 8-worker parallel, checkpoint/resume
-  - A4.3 — Save to `data/hf_supplement_enriched.jsonl`
-  - A4.4 — Run enrichment (~2–4 hours for ~6K examples)
-  - A4.5 — Validate: spot-check 20 examples
+- **Status:** `[~]` SKIPPED — raw HF comments are already decent quality from real reviewers
+- **Rationale:** At ~24s/example, enriching 7,996 HF examples would take ~53 hours. The raw comments are
+  already substantive (min 50 chars, quality >= 0.43). The pipeline's DPO step will further refine output format.
+  Teacher enrichment was applied to the 200 domain-specific GitHub-mined examples where it matters most.
 
 ---
 
@@ -387,9 +384,9 @@
 
 ### B8. Training Image Rebuild (Conditional)
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[x]` DONE — `v0.6.0` built and pushed Apr 5, 2026
 - **File:** `pipeline/training/Dockerfile`
-- **Current image:** `quay.io/rh-ee-srpillai/distillation-trainer:v0.5.2`
+- **Image:** `quay.io/rh-ee-srpillai/distillation-trainer:v0.6.0` (was `v0.5.2`)
 - **Subtasks:**
   - B8.1 — Verify locally: `python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-1.5B-Instruct')"`
   - B8.2 — If tiktoken needed: add `tiktoken` to Dockerfile pip install
@@ -399,10 +396,19 @@
 
 ### B9. Compile Pipeline
 
-- **Status:** `[ ]` NOT STARTED
+- **Status:** `[x]` DONE — compiled Apr 5, 2026
+- **File:** `pipeline/code_review_pipeline.py` → `pipeline/code_review_pipeline.yaml`
+- **Note:** Phase 3 uses a **separate pipeline file** (`code_review_pipeline.py`) to keep Phase 2 (`pipeline.py`) intact for demos
 - **Subtasks:**
-  - B9.1 — Compile: `python -m kfp.compiler.compiler pipeline.py distillation_flywheel.yaml`
+  - B9.1 — Compile: `cd pipeline && python3 code_review_pipeline.py` → `code_review_pipeline.yaml`
   - B9.2 — Upload to RHOAI Dashboard or via KFP client
+
+### B10. Create KServe ISVC for Code Review
+
+- **Status:** `[x]` DONE — created Apr 5, 2026
+- **Resource:** `InferenceService/code-review-llm` in namespace `sridharproject`
+- **Note:** Separate from `student-llm` (Phase 2 demo). Pipeline will patch `storageUri` after training.
+- **Spec:** vLLM runtime, 1x GPU, 16Gi memory, `student-model-sa` service account
 
 ---
 
@@ -416,7 +422,7 @@
   - C1.2 — Confirm training data uploaded to `s3://mlflow-artifacts/synthetic/code-review/`
   - C1.3 — Confirm diff-bank.json uploaded to `s3://mlflow-artifacts/synthetic/code-review/diff-bank.json`
   - C1.4 — Confirm training image is accessible (v0.5.2 or v0.6.0)
-  - C1.5 — Confirm KServe ISVC `student-llm` exists and is healthy
+  - C1.5 — Confirm KServe ISVC `code-review-llm` exists (Phase 3) and `student-llm` is untouched (Phase 2)
 
 ### C2. Execute Pipeline Run
 
@@ -428,7 +434,7 @@
   - C2.4 — Monitor Step 2 (SFT) — QLoRA on Qwen2.5-Coder-1.5B-Instruct, ~3 epochs
   - C2.5 — Monitor Step 3 (Extract Preferences) — Source A likely empty (first run), Source B queries 50 diffs from diff-bank
   - C2.6 — Monitor Step 4 (DPO) — depends on preference pair count; may passthrough SFT if < `min_dpo_pairs`
-  - C2.7 — Monitor Step 5 (Deploy) — patches `student-llm` ISVC with new model S3 path
+  - C2.7 — Monitor Step 5 (Deploy) — patches `code-review-llm` ISVC with new model S3 path
   - C2.8 — Monitor Step 6 (Evaluate) — runs 15 code review diffs, grades with new criteria
 
 ### C3. Analyze Results
@@ -500,9 +506,15 @@
 | B7.1 | `pipeline/components/evaluate.py`            | 188     | Experiment → `"CodeReview-Eval-Hub"`                        |
 | B7.2 | `pipeline/components/extract_preferences.py` | 148     | Experiment → `"CodeReview-Eval-Hub"`                        |
 | B8   | `pipeline/training/Dockerfile`               | 3–12    | Add `tiktoken` (conditional)                                |
+| B8.5 | `pipeline/components/finetune.py`            | 64      | Image tag → `v0.6.0`                                       |
+| B8.5 | `pipeline/components/dpo_finetune.py`        | 64      | Image tag → `v0.6.0`                                       |
 | NEW  | `scripts/mine_github_reviews.py`             | —       | GitHub API mining, filtering, enrichment                    |
 | NEW  | `scripts/prepare_hf_supplement.py`           | —       | HF dataset download, filter, enrich                         |
 | NEW  | `scripts/format_training_data.py`            | —       | Merge streams, ChatML format, upload to MinIO               |
+| NEW  | `scripts/enrich_with_teacher.py`             | —       | Teacher enrichment with Ollama (checkpoint/resume)          |
+| NEW  | `pipeline/code_review_pipeline.py`           | —       | Phase 3 pipeline definition (separate from Phase 2)         |
+| NEW  | `pipeline/code_review_pipeline.yaml`         | —       | Compiled Phase 3 pipeline YAML                              |
+| NEW  | `pipeline/pipeline_phase2.py`                | —       | Backup of original Phase 2 pipeline                         |
 
 
 ---
