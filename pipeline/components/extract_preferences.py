@@ -82,24 +82,29 @@ def extract_preferences(
 
     def teacher_llm_call(messages: list, max_tokens: int = 512, temperature: float = 0.7) -> str:
         for attempt in range(8):
-            resp = requests.post(
-                api_url,
-                headers=headers,
-                json={
-                    "model": teacher_model,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                },
-                timeout=300,
-            )
-            if resp.status_code == 429:
+            try:
+                resp = requests.post(
+                    api_url,
+                    headers=headers,
+                    json={
+                        "model": teacher_model,
+                        "messages": messages,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                    timeout=300,
+                )
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    wait = min(2 ** attempt * 5, 120)
+                    print(f"  [{resp.status_code}] Server error, waiting {wait}s (attempt {attempt+1}/8)")
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+            except (requests.ConnectionError, requests.Timeout) as e:
                 wait = min(2 ** attempt * 5, 120)
-                print(f"  [429] Rate limited, waiting {wait}s (attempt {attempt+1}/8)")
+                print(f"  [Connection error] {e}, waiting {wait}s (attempt {attempt+1}/8)")
                 time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
         resp.raise_for_status()
         return ""
 

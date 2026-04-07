@@ -622,31 +622,43 @@ deploymentSpec:
           \      raise RuntimeError(f\"Student unreachable after {max_retries} retries\"\
           )\n\n    def _teacher_call(messages: list, max_tokens: int = 512, temperature:\
           \ float = 0.7) -> str:\n        \"\"\"Call teacher LLM API with exponential\
-          \ backoff on 429 rate limits.\"\"\"\n        for attempt in range(8):\n\
-          \            resp = requests.post(\n                api_url,\n         \
-          \       headers=api_headers,\n                json={\n                 \
-          \   \"model\": teacher_model,\n                    \"messages\": messages,\n\
-          \                    \"max_tokens\": max_tokens,\n                    \"\
-          temperature\": temperature,\n                },\n                timeout=300,\n\
-          \            )\n            if resp.status_code == 429:\n              \
-          \  wait = min(2 ** attempt * 5, 120)\n                print(f\"  [429] Rate\
-          \ limited, waiting {wait}s (attempt {attempt+1}/8)\")\n                time.sleep(wait)\n\
-          \                continue\n            resp.raise_for_status()\n       \
-          \     return resp.json()[\"choices\"][0][\"message\"][\"content\"]\n   \
-          \     resp.raise_for_status()\n        return \"\"\n\n    def query_teacher(question:\
-          \ str) -> str:\n        return _teacher_call([\n            {\"role\": \"\
-          system\", \"content\": \"You are a helpful and concise assistant.\"},\n\
-          \            {\"role\": \"user\", \"content\": question},\n        ], max_tokens=512,\
-          \ temperature=0.7)\n\n    def teacher_grade(question: str, answer: str)\
-          \ -> dict:\n        raw = _teacher_call([\n            {\"role\": \"system\"\
-          , \"content\": GRADING_PROMPT},\n            {\"role\": \"user\", \"content\"\
-          : f\"Question: {question}\\n\\nStudent Response: {answer}\"},\n        ],\
-          \ max_tokens=200, temperature=0.0)\n        try:\n            return json.loads(raw)\n\
-          \        except json.JSONDecodeError:\n            return {\"score\": 0,\
-          \ \"reason\": f\"Failed to parse: {raw}\"}\n\n    print(\"\\n\" + \"=\"\
-          \ * 60)\n    results = []\n    for i, q in enumerate(test_questions):\n\
-          \        print(f\"\\n--- Question {i+1}/{len(test_questions)} ---\")\n \
-          \       print(f\"Q: {q}\")\n\n        student_answer = query_student(q)\n\
+          \ backoff on 429/5xx errors.\"\"\"\n        for attempt in range(8):\n \
+          \           try:\n                resp = requests.post(\n              \
+          \      api_url,\n                    headers=api_headers,\n            \
+          \        json={\n                        \"model\": teacher_model,\n   \
+          \                     \"messages\": messages,\n                        \"\
+          max_tokens\": max_tokens,\n                        \"temperature\": temperature,\n\
+          \                    },\n                    timeout=300,\n            \
+          \    )\n                if resp.status_code == 429 or resp.status_code >=\
+          \ 500:\n                    wait = min(2 ** attempt * 5, 120)\n        \
+          \            print(f\"  [{resp.status_code}] Server error, waiting {wait}s\
+          \ (attempt {attempt+1}/8)\")\n                    time.sleep(wait)\n   \
+          \                 continue\n                resp.raise_for_status()\n  \
+          \              return resp.json()[\"choices\"][0][\"message\"][\"content\"\
+          ]\n            except (requests.ConnectionError, requests.Timeout) as e:\n\
+          \                wait = min(2 ** attempt * 5, 120)\n                print(f\"\
+          \  [Connection error] {e}, waiting {wait}s (attempt {attempt+1}/8)\")\n\
+          \                time.sleep(wait)\n        resp.raise_for_status()\n   \
+          \     return \"\"\n\n    def query_teacher(question: str) -> str:\n    \
+          \    return _teacher_call([\n            {\"role\": \"system\", \"content\"\
+          : \"You are a helpful and concise assistant.\"},\n            {\"role\"\
+          : \"user\", \"content\": question},\n        ], max_tokens=512, temperature=0.7)\n\
+          \n    def teacher_grade(question: str, answer: str) -> dict:\n        raw\
+          \ = _teacher_call([\n            {\"role\": \"system\", \"content\": GRADING_PROMPT},\n\
+          \            {\"role\": \"user\", \"content\": f\"Question: {question}\\\
+          n\\nStudent Response: {answer}\"},\n        ], max_tokens=200, temperature=0.0)\n\
+          \        try:\n            return json.loads(raw)\n        except json.JSONDecodeError:\n\
+          \            import re\n            m = re.search(r'```(?:json)?\\s*(\\\
+          {.*?\\})\\s*```', raw, re.DOTALL)\n            if m:\n                try:\n\
+          \                    return json.loads(m.group(1))\n                except\
+          \ json.JSONDecodeError:\n                    pass\n            m2 = re.search(r'\\\
+          {[^{}]*\"score\"\\s*:\\s*\\d+[^{}]*\\}', raw)\n            if m2:\n    \
+          \            try:\n                    return json.loads(m2.group(0))\n\
+          \                except json.JSONDecodeError:\n                    pass\n\
+          \            return {\"score\": 0, \"reason\": f\"Failed to parse: {raw}\"\
+          }\n\n    print(\"\\n\" + \"=\" * 60)\n    results = []\n    for i, q in\
+          \ enumerate(test_questions):\n        print(f\"\\n--- Question {i+1}/{len(test_questions)}\
+          \ ---\")\n        print(f\"Q: {q}\")\n\n        student_answer = query_student(q)\n\
           \        print(f\"\\nStudent:\\n{student_answer}\\n\")\n\n        grade\
           \ = teacher_grade(q, student_answer)\n        print(f\"Teacher Grade: {grade['score']}/10\"\
           )\n        print(f\"Reason: {grade.get('reason', 'N/A')}\")\n\n        results.append({\n\
@@ -802,20 +814,25 @@ deploymentSpec:
           \n\n    headers = {\"Content-Type\": \"application/json\"}\n    if teacher_api_key:\n\
           \        headers[\"Authorization\"] = f\"Bearer {teacher_api_key}\"\n\n\
           \    def teacher_llm_call(messages: list, max_tokens: int = 512, temperature:\
-          \ float = 0.7) -> str:\n        for attempt in range(8):\n            resp\
-          \ = requests.post(\n                api_url,\n                headers=headers,\n\
-          \                json={\n                    \"model\": teacher_model,\n\
-          \                    \"messages\": messages,\n                    \"max_tokens\"\
-          : max_tokens,\n                    \"temperature\": temperature,\n     \
-          \           },\n                timeout=300,\n            )\n          \
-          \  if resp.status_code == 429:\n                wait = min(2 ** attempt\
-          \ * 5, 120)\n                print(f\"  [429] Rate limited, waiting {wait}s\
+          \ float = 0.7) -> str:\n        for attempt in range(8):\n            try:\n\
+          \                resp = requests.post(\n                    api_url,\n \
+          \                   headers=headers,\n                    json={\n     \
+          \                   \"model\": teacher_model,\n                        \"\
+          messages\": messages,\n                        \"max_tokens\": max_tokens,\n\
+          \                        \"temperature\": temperature,\n               \
+          \     },\n                    timeout=300,\n                )\n        \
+          \        if resp.status_code == 429 or resp.status_code >= 500:\n      \
+          \              wait = min(2 ** attempt * 5, 120)\n                    print(f\"\
+          \  [{resp.status_code}] Server error, waiting {wait}s (attempt {attempt+1}/8)\"\
+          )\n                    time.sleep(wait)\n                    continue\n\
+          \                resp.raise_for_status()\n                return resp.json()[\"\
+          choices\"][0][\"message\"][\"content\"]\n            except (requests.ConnectionError,\
+          \ requests.Timeout) as e:\n                wait = min(2 ** attempt * 5,\
+          \ 120)\n                print(f\"  [Connection error] {e}, waiting {wait}s\
           \ (attempt {attempt+1}/8)\")\n                time.sleep(wait)\n       \
-          \         continue\n            resp.raise_for_status()\n            return\
-          \ resp.json()[\"choices\"][0][\"message\"][\"content\"]\n        resp.raise_for_status()\n\
-          \        return \"\"\n\n    def query_student(question: str) -> str:\n \
-          \       for attempt in range(5):\n            try:\n                resp\
-          \ = requests.post(\n                    f\"{student_url}/v1/chat/completions\"\
+          \ resp.raise_for_status()\n        return \"\"\n\n    def query_student(question:\
+          \ str) -> str:\n        for attempt in range(5):\n            try:\n   \
+          \             resp = requests.post(\n                    f\"{student_url}/v1/chat/completions\"\
           ,\n                    json={\n                        \"model\": \"/mnt/models\"\
           ,\n                        \"messages\": [{\"role\": \"user\", \"content\"\
           : question}],\n                        \"max_tokens\": 256,\n          \

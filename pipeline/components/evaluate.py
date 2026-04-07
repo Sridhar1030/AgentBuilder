@@ -106,26 +106,31 @@ def evaluate(
         raise RuntimeError(f"Student unreachable after {max_retries} retries")
 
     def _teacher_call(messages: list, max_tokens: int = 512, temperature: float = 0.7) -> str:
-        """Call teacher LLM API with exponential backoff on 429 rate limits."""
+        """Call teacher LLM API with exponential backoff on 429/5xx errors."""
         for attempt in range(8):
-            resp = requests.post(
-                api_url,
-                headers=api_headers,
-                json={
-                    "model": teacher_model,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                },
-                timeout=300,
-            )
-            if resp.status_code == 429:
+            try:
+                resp = requests.post(
+                    api_url,
+                    headers=api_headers,
+                    json={
+                        "model": teacher_model,
+                        "messages": messages,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                    timeout=300,
+                )
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    wait = min(2 ** attempt * 5, 120)
+                    print(f"  [{resp.status_code}] Server error, waiting {wait}s (attempt {attempt+1}/8)")
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+            except (requests.ConnectionError, requests.Timeout) as e:
                 wait = min(2 ** attempt * 5, 120)
-                print(f"  [429] Rate limited, waiting {wait}s (attempt {attempt+1}/8)")
+                print(f"  [Connection error] {e}, waiting {wait}s (attempt {attempt+1}/8)")
                 time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
         resp.raise_for_status()
         return ""
 
@@ -143,6 +148,19 @@ def evaluate(
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
+            import re
+            m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+            if m:
+                try:
+                    return json.loads(m.group(1))
+                except json.JSONDecodeError:
+                    pass
+            m2 = re.search(r'\{[^{}]*"score"\s*:\s*\d+[^{}]*\}', raw)
+            if m2:
+                try:
+                    return json.loads(m2.group(0))
+                except json.JSONDecodeError:
+                    pass
             return {"score": 0, "reason": f"Failed to parse: {raw}"}
 
     print("\n" + "=" * 60)
