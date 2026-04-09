@@ -154,12 +154,12 @@ def code_review_pipeline(
     s3_access_key: str = "minioadmin",
     s3_secret_key: str = "minioadmin123",
     teacher_api_url: str = "http://ollama.sridharproject.svc.cluster.local:11434",
-    teacher_model: str = "qwen2.5-coder:7b-instruct-q4_K_M",
+    teacher_model: str = "qwen2.5-coder:32b-instruct-q4_K_M",
     teacher_api_key: str = "",
     num_epochs: int = 3,
-    dpo_epochs: int = 1,
+    dpo_epochs: int = 3,
     dpo_beta: float = 0.1,
-    min_dpo_pairs: int = 5,
+    min_dpo_pairs: int = 3,
     max_supplement_questions: int = 50,
 ):
     # Step 0 -- Resolve version (auto-increment code-review-1.5b-vN)
@@ -170,6 +170,7 @@ def code_review_pipeline(
         model_bucket="sridhar-models",
         model_prefix="code-review-1.5b-",
         gold_bucket=TEACHER_BUCKET,
+        hf_base_model_id=BASE_MODEL_ID,
         explicit_version=model_version,
     )
     version_task.set_caching_options(False)
@@ -186,10 +187,12 @@ def code_review_pipeline(
     extract_task.set_caching_options(False)
 
     # Step 2 -- SFT fine-tune with QLoRA (GPU)
+    # Iterative training (Option B): resolve_version returns the previous run's
+    # S3 model path if one exists, otherwise returns the HF base model ID.
     sft_task = finetune(
         gold_data_path=extract_task.output,
         model_output_s3_path=version_task.outputs["model_output_path"],
-        base_model_id=BASE_MODEL_ID,
+        base_model_id=version_task.outputs["prev_model_path"],
         s3_endpoint=S3_ENDPOINT,
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,

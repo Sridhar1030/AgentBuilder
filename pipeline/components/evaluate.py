@@ -29,9 +29,12 @@ def evaluate(
     """Send test questions to Student, have Teacher grade responses, log to MLflow."""
     import json
     import os
+    import sys
     import time
     import requests
     import mlflow
+
+    sys.stdout.reconfigure(line_buffering=True)
 
     if mlflow_tracking_uri.startswith("https://"):
         os.environ.setdefault("MLFLOW_TRACKING_INSECURE_TLS", "true")
@@ -88,10 +91,10 @@ def evaluate(
                         "max_tokens": 256,
                         "temperature": 0.3,
                     },
-                    timeout=90,
+                    timeout=120,
                 )
-                if resp.status_code in (404, 503):
-                    wait = min(15 * (attempt + 1), 60)
+                if resp.status_code in (400, 404, 503):
+                    wait = min(20 * (attempt + 1), 120)
                     print(f"  [{attempt+1}/{max_retries}] HTTP {resp.status_code}, vLLM not ready. Retry in {wait}s")
                     time.sleep(wait)
                     continue
@@ -100,13 +103,14 @@ def evaluate(
                 resp.raise_for_status()
                 return resp.json()["choices"][0]["message"]["content"]
             except (requests.ConnectionError, requests.Timeout) as e:
-                wait = min(15 * (attempt + 1), 60)
+                wait = min(20 * (attempt + 1), 120)
                 print(f"  [{attempt+1}/{max_retries}] Connection error, retry in {wait}s: {e}")
                 time.sleep(wait)
         raise RuntimeError(f"Student unreachable after {max_retries} retries")
 
     def _teacher_call(messages: list, max_tokens: int = 512, temperature: float = 0.7) -> str:
         """Call teacher LLM API with exponential backoff on 429/5xx errors."""
+        last_error = None
         for attempt in range(8):
             try:
                 resp = requests.post(
@@ -118,11 +122,12 @@ def evaluate(
                         "max_tokens": max_tokens,
                         "temperature": temperature,
                     },
-                    timeout=300,
+                    timeout=600,
                 )
                 if resp.status_code == 429 or resp.status_code >= 500:
                     wait = min(2 ** attempt * 5, 120)
                     print(f"  [{resp.status_code}] Server error, waiting {wait}s (attempt {attempt+1}/8)")
+                    last_error = f"HTTP {resp.status_code}"
                     time.sleep(wait)
                     continue
                 resp.raise_for_status()
@@ -130,9 +135,9 @@ def evaluate(
             except (requests.ConnectionError, requests.Timeout) as e:
                 wait = min(2 ** attempt * 5, 120)
                 print(f"  [Connection error] {e}, waiting {wait}s (attempt {attempt+1}/8)")
+                last_error = str(e)
                 time.sleep(wait)
-        resp.raise_for_status()
-        return ""
+        raise RuntimeError(f"Teacher unreachable after 8 retries. Last error: {last_error}")
 
     def query_teacher(question: str) -> str:
         return _teacher_call([

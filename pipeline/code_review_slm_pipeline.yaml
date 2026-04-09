@@ -468,91 +468,57 @@ deploymentSpec:
           \    apps_api = client.AppsV1Api()\n    custom_api = client.CustomObjectsApi()\n\
           \    core_api = client.CoreV1Api()\n\n    namespace = \"sridharproject\"\
           \n    job_name = f\"dpo-{int(time.time())}\"\n    image = \"quay.io/rh-ee-srpillai/distillation-trainer:v1.1.4\"\
-          \n\n    # --- GPU evacuation and restore helpers ---\n    isvc_deployment\
-          \ = \"code-review-llm-predictor\"\n\n    def _scale_down_kserve():\n   \
-          \     try:\n            dep = apps_api.read_namespaced_deployment(isvc_deployment,\
-          \ namespace)\n            if dep.spec.replicas and dep.spec.replicas > 0:\n\
-          \                print(f\"[{time.strftime('%H:%M:%S')}] Scaling down {isvc_deployment}\
-          \ to free GPU node...\")\n                apps_api.patch_namespaced_deployment_scale(\n\
-          \                    isvc_deployment, namespace, {\"spec\": {\"replicas\"\
-          : 0}},\n                )\n                for _ in range(60):\n       \
-          \             time.sleep(5)\n                    pods = core_api.list_namespaced_pod(\n\
-          \                        namespace, label_selector=f\"app=isvc.{isvc_deployment}\"\
-          ,\n                    )\n                    if not pods.items:\n     \
-          \                   break\n                print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ {isvc_deployment} scaled to 0 -- GPU freed\")\n        except Exception\
-          \ as e:\n            print(f\"[{time.strftime('%H:%M:%S')}] KServe scale-down\
-          \ skipped: {e}\")\n\n    def _restore_kserve():\n        \"\"\"Scale KServe\
-          \ back up and wait until the pod is Ready.\"\"\"\n        try:\n       \
-          \     dep = apps_api.read_namespaced_deployment(isvc_deployment, namespace)\n\
-          \            if (dep.spec.replicas or 0) < 1:\n                print(f\"\
-          [{time.strftime('%H:%M:%S')}] Restoring {isvc_deployment} to 1 replica...\"\
-          )\n                apps_api.patch_namespaced_deployment_scale(\n       \
-          \             isvc_deployment, namespace, {\"spec\": {\"replicas\": 1}},\n\
-          \                )\n            for attempt in range(60):\n            \
-          \    time.sleep(10)\n                pods = core_api.list_namespaced_pod(\n\
-          \                    namespace, label_selector=f\"app=isvc.{isvc_deployment}\"\
-          ,\n                )\n                for pod in pods.items:\n         \
-          \           if all(\n                        cs.ready\n                \
-          \        for cs in (pod.status.container_statuses or [])\n             \
-          \       ):\n                        print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ {isvc_deployment} is Ready (waited {(attempt+1)*10}s)\")\n           \
-          \             return\n                if attempt % 6 == 5:\n           \
-          \         print(f\"[{time.strftime('%H:%M:%S')}] Still waiting for {isvc_deployment}\
-          \ to be Ready... ({(attempt+1)*10}s)\")\n            print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ WARNING: {isvc_deployment} not Ready after 600s, proceeding anyway\")\n\
-          \        except Exception as e:\n            print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ KServe restore failed: {e}\")\n\n    _scale_down_kserve()\n\n    # ---\
-          \ Discover GPU topology from the cluster ---\n    available_gpu_nodes =\
-          \ 0\n    gpus_per_node_list = []\n    blocked_taints = {\"node.kubernetes.io/unreachable\"\
-          , \"node.kubernetes.io/not-ready\"}\n    try:\n        nodes = core_api.list_node(label_selector=\"\
-          nvidia.com/gpu.present=true\")\n        all_pods = core_api.list_pod_for_all_namespaces(field_selector=\"\
-          status.phase=Running\").items\n        gpu_used_per_node = {}\n        for\
-          \ pod in all_pods:\n            node_name = pod.spec.node_name\n       \
-          \     if not node_name:\n                continue\n            for c in\
-          \ (pod.spec.containers or []):\n                req = (c.resources.requests\
-          \ or {}) if c.resources else {}\n                gpu_req = int(req.get(\"\
-          nvidia.com/gpu\", 0))\n                if gpu_req:\n                   \
-          \ gpu_used_per_node[node_name] = gpu_used_per_node.get(node_name, 0) + gpu_req\n\
-          \n        for node in nodes.items:\n            ready = any(\n         \
-          \       c.type == \"Ready\" and c.status == \"True\"\n                for\
+          \n\n    # --- Evacuate GPU consumers before training ---\n    isvc_deployment\
+          \ = \"code-review-llm-predictor\"\n    try:\n        dep = apps_api.read_namespaced_deployment(isvc_deployment,\
+          \ namespace)\n        if dep.spec.replicas and dep.spec.replicas > 0:\n\
+          \            print(f\"[{time.strftime('%H:%M:%S')}] Scaling down {isvc_deployment}\
+          \ to free GPU node...\")\n            apps_api.patch_namespaced_deployment_scale(\n\
+          \                isvc_deployment, namespace, {\"spec\": {\"replicas\": 0}},\n\
+          \            )\n            for _ in range(60):\n                time.sleep(5)\n\
+          \                pods = core_api.list_namespaced_pod(\n                \
+          \    namespace, label_selector=f\"app=isvc.{isvc_deployment}\",\n      \
+          \          )\n                if not pods.items:\n                    break\n\
+          \            print(f\"[{time.strftime('%H:%M:%S')}] {isvc_deployment} scaled\
+          \ to 0 -- GPU freed\")\n    except Exception as e:\n        print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ KServe scale-down skipped: {e}\")\n\n    # --- Discover GPU topology from\
+          \ the cluster ---\n    available_gpu_nodes = 0\n    gpus_per_node_list =\
+          \ []\n    blocked_taints = {\"node.kubernetes.io/unreachable\", \"node.kubernetes.io/not-ready\"\
+          }\n    try:\n        nodes = core_api.list_node(label_selector=\"nvidia.com/gpu.present=true\"\
+          )\n        for node in nodes.items:\n            ready = any(\n        \
+          \        c.type == \"Ready\" and c.status == \"True\"\n                for\
           \ c in (node.status.conditions or [])\n            )\n            tainted\
           \ = any(\n                t.effect in (\"NoSchedule\", \"NoExecute\") and\
           \ t.key in blocked_taints\n                for t in (node.spec.taints or\
           \ [])\n            )\n            if ready and not tainted:\n          \
-          \      gpu_cap = int(node.status.allocatable.get(\"nvidia.com/gpu\", \"\
-          0\"))\n                gpu_used = gpu_used_per_node.get(node.metadata.name,\
-          \ 0)\n                gpu_free = gpu_cap - gpu_used\n                print(f\"\
-          [{time.strftime('%H:%M:%S')}]   Node {node.metadata.name}: {gpu_cap} total,\
-          \ {gpu_used} used, {gpu_free} free\")\n                if gpu_free >= 4:\n\
-          \                    available_gpu_nodes += 1\n                    gpus_per_node_list.append(gpu_free)\n\
-          \                else:\n                    print(f\"[{time.strftime('%H:%M:%S')}]\
-          \   -> Skipping (need 4 free GPUs, only {gpu_free})\")\n    except Exception\
-          \ as e:\n        print(f\"[{time.strftime('%H:%M:%S')}] Could not query\
-          \ nodes ({e}), falling back to 2 nodes x 4 GPUs\")\n        available_gpu_nodes\
-          \ = 2\n        gpus_per_node_list = [4, 4]\n\n    num_gpus_per_node = min(gpus_per_node_list)\
-          \ if gpus_per_node_list else 4\n    print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ GPU topology: {available_gpu_nodes} usable nodes x {num_gpus_per_node}\
-          \ GPUs/node\")\n\n    # --- Cap by dataset size: need >= 6 samples per GPU\
-          \ for meaningful DPO ---\n    min_samples_per_gpu = 6\n    max_data_nodes\
-          \ = max(1, num_pref_pairs // (min_samples_per_gpu * num_gpus_per_node))\n\
-          \n    num_total_nodes = min(max_data_nodes, available_gpu_nodes)\n    num_workers\
-          \ = max(0, num_total_nodes - 1)\n    total_gpus = num_total_nodes * num_gpus_per_node\n\
-          \    print(f\"[{time.strftime('%H:%M:%S')}] Auto-scaled DPO: {num_pref_pairs}\
-          \ pairs -> {num_total_nodes} nodes ({num_workers} workers) x {num_gpus_per_node}\
-          \ GPUs = {total_gpus} GPUs\")\n\n    env_list = [\n        {\"name\": \"\
-          TRAINING_MODE\", \"value\": \"dpo\"},\n        {\"name\": \"PREF_DATA_PATH\"\
-          , \"value\": pref_data_s3_path},\n        {\"name\": \"BASE_MODEL_ID\",\
-          \ \"value\": sft_model_s3_path},\n        {\"name\": \"MODEL_OUTPUT_S3_PATH\"\
-          , \"value\": model_output_s3_path},\n        {\"name\": \"NUM_EPOCHS\",\
-          \ \"value\": str(num_epochs)},\n        {\"name\": \"BATCH_SIZE\", \"value\"\
-          : str(batch_size)},\n        {\"name\": \"LEARNING_RATE\", \"value\": str(learning_rate)},\n\
-          \        {\"name\": \"LORA_R\", \"value\": str(lora_r)},\n        {\"name\"\
-          : \"LORA_ALPHA\", \"value\": str(lora_alpha)},\n        {\"name\": \"DPO_BETA\"\
-          , \"value\": str(dpo_beta)},\n        {\"name\": \"S3_ENDPOINT\", \"value\"\
-          : s3_endpoint},\n        {\"name\": \"S3_ACCESS_KEY\", \"value\": s3_access_key},\n\
-          \        {\"name\": \"S3_SECRET_KEY\", \"value\": s3_secret_key},\n    ]\n\
-          \n    container_spec = {\n        \"name\": \"pytorch\",\n        \"image\"\
+          \      available_gpu_nodes += 1\n                gpu_cap = int(node.status.capacity.get(\"\
+          nvidia.com/gpu\", \"0\"))\n                gpus_per_node_list.append(gpu_cap)\n\
+          \                print(f\"[{time.strftime('%H:%M:%S')}]   Node {node.metadata.name}:\
+          \ {gpu_cap} GPUs\")\n    except Exception as e:\n        print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Could not query nodes ({e}), falling back to 2 nodes x 4 GPUs\")\n   \
+          \     available_gpu_nodes = 2\n        gpus_per_node_list = [4, 4]\n\n \
+          \   num_gpus_per_node = min(gpus_per_node_list) if gpus_per_node_list else\
+          \ 4\n    print(f\"[{time.strftime('%H:%M:%S')}] GPU topology: {available_gpu_nodes}\
+          \ nodes x {num_gpus_per_node} GPUs/node\")\n\n    # --- Cap by dataset size:\
+          \ need >= 6 samples per GPU for meaningful DPO ---\n    min_samples_per_gpu\
+          \ = 6\n    max_data_nodes = max(1, num_pref_pairs // (min_samples_per_gpu\
+          \ * num_gpus_per_node))\n\n    num_total_nodes = min(max_data_nodes, available_gpu_nodes)\n\
+          \    num_workers = max(0, num_total_nodes - 1)\n    total_gpus = num_total_nodes\
+          \ * num_gpus_per_node\n    print(f\"[{time.strftime('%H:%M:%S')}] Auto-scaled\
+          \ DPO: {num_pref_pairs} pairs -> {num_total_nodes} nodes ({num_workers}\
+          \ workers) x {num_gpus_per_node} GPUs = {total_gpus} GPUs\")\n\n    env_list\
+          \ = [\n        {\"name\": \"TRAINING_MODE\", \"value\": \"dpo\"},\n    \
+          \    {\"name\": \"PREF_DATA_PATH\", \"value\": pref_data_s3_path},\n   \
+          \     {\"name\": \"BASE_MODEL_ID\", \"value\": sft_model_s3_path},\n   \
+          \     {\"name\": \"MODEL_OUTPUT_S3_PATH\", \"value\": model_output_s3_path},\n\
+          \        {\"name\": \"NUM_EPOCHS\", \"value\": str(num_epochs)},\n     \
+          \   {\"name\": \"BATCH_SIZE\", \"value\": str(batch_size)},\n        {\"\
+          name\": \"LEARNING_RATE\", \"value\": str(learning_rate)},\n        {\"\
+          name\": \"LORA_R\", \"value\": str(lora_r)},\n        {\"name\": \"LORA_ALPHA\"\
+          , \"value\": str(lora_alpha)},\n        {\"name\": \"DPO_BETA\", \"value\"\
+          : str(dpo_beta)},\n        {\"name\": \"S3_ENDPOINT\", \"value\": s3_endpoint},\n\
+          \        {\"name\": \"S3_ACCESS_KEY\", \"value\": s3_access_key},\n    \
+          \    {\"name\": \"S3_SECRET_KEY\", \"value\": s3_secret_key},\n    ]\n\n\
+          \    container_spec = {\n        \"name\": \"pytorch\",\n        \"image\"\
           : image,\n        \"env\": env_list,\n        \"resources\": {\n       \
           \     \"requests\": {\n                \"nvidia.com/gpu\": str(num_gpus_per_node),\n\
           \                \"memory\": \"48Gi\",\n                \"cpu\": \"8\",\n\
@@ -605,55 +571,50 @@ deploymentSpec:
           \ timestamp before DPO: {model_ts_before}\")\n\n    def _model_is_new()\
           \ -> bool:\n        ts = _model_s3_timestamp()\n        if ts is None:\n\
           \            return False\n        if model_ts_before is None:\n       \
-          \     return True\n        return ts > model_ts_before\n\n    result = None\n\
-          \    try:\n        job_failed = False\n        fail_msg = \"\"\n\n     \
-          \   while elapsed < timeout:\n            time.sleep(poll_interval)\n  \
-          \          elapsed += poll_interval\n\n            if _model_is_new():\n\
-          \                hrs, rem = divmod(elapsed, 3600)\n                mins\
-          \ = rem // 60\n                status = \"Failed\" if job_failed else \"\
-          Running/Succeeded\"\n                print(f\"[{time.strftime('%H:%M:%S')}]\
+          \     return True\n        return ts > model_ts_before\n\n    job_failed\
+          \ = False\n    fail_msg = \"\"\n\n    while elapsed < timeout:\n       \
+          \ time.sleep(poll_interval)\n        elapsed += poll_interval\n\n      \
+          \  if _model_is_new():\n            hrs, rem = divmod(elapsed, 3600)\n \
+          \           mins = rem // 60\n            status = \"Failed\" if job_failed\
+          \ else \"Running/Succeeded\"\n            print(f\"[{time.strftime('%H:%M:%S')}]\
           \ DPO model updated in S3 (job status={status}, elapsed={hrs}h{mins}m).\
-          \ Success.\")\n                try:\n                    custom_api.delete_namespaced_custom_object(\n\
-          \                        group=\"kubeflow.org\", version=\"v1\", namespace=namespace,\n\
-          \                        plural=\"pytorchjobs\", name=job_name,\n      \
-          \              )\n                except Exception:\n                  \
-          \  pass\n                result = model_output_s3_path\n               \
-          \ return result\n\n            if job_failed:\n                print(f\"\
-          [{time.strftime('%H:%M:%S')}] Waiting for model upload... (elapsed={elapsed}s)\"\
-          )\n                continue\n\n            try:\n                job = custom_api.get_namespaced_custom_object(\n\
+          \ Success.\")\n            try:\n                custom_api.delete_namespaced_custom_object(\n\
           \                    group=\"kubeflow.org\", version=\"v1\", namespace=namespace,\n\
           \                    plural=\"pytorchjobs\", name=job_name,\n          \
-          \      )\n            except Exception as e:\n                print(f\"\
-          [{time.strftime('%H:%M:%S')}] Could not fetch job status ({e}), will retry...\"\
-          )\n                continue\n\n            conditions = job.get(\"status\"\
-          , {}).get(\"conditions\", [])\n            for c in conditions:\n      \
-          \          ctype = c.get(\"type\")\n                if ctype == \"Succeeded\"\
-          \ and c.get(\"status\") == \"True\":\n                    hrs, rem = divmod(elapsed,\
-          \ 3600)\n                    mins = rem // 60\n                    print(f\"\
-          [{time.strftime('%H:%M:%S')}] DPO PyTorchJob {job_name} succeeded ({hrs}h{mins}m)\"\
-          )\n                    result = model_output_s3_path\n                 \
-          \   return result\n                if ctype == \"Failed\" and c.get(\"status\"\
-          ) == \"True\":\n                    job_failed = True\n                \
-          \    fail_msg = c.get(\"message\", \"unknown error\")\n                \
-          \    print(f\"[{time.strftime('%H:%M:%S')}] DPO job {job_name} status=Failed.\
-          \ Continuing to poll S3 for model upload...\")\n                    break\n\
-          \n            if not job_failed:\n                hrs, rem = divmod(elapsed,\
-          \ 3600)\n                mins = rem // 60\n                print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ DPO PyTorchJob {job_name} running (elapsed={hrs}h{mins}m)\")\n\n     \
-          \   if job_failed:\n            try:\n                pods = core_api.list_namespaced_pod(\n\
-          \                    namespace=namespace,\n                    label_selector=f\"\
-          training.kubeflow.org/job-name={job_name}\",\n                )\n      \
-          \          if pods.items:\n                    pod_name = pods.items[0].metadata.name\n\
-          \                    logs = core_api.read_namespaced_pod_log(\n        \
-          \                name=pod_name, namespace=namespace, tail_lines=100,\n \
-          \                   )\n                    fail_msg = f\"{fail_msg}\\n\\\
-          n--- Pod {pod_name} logs ---\\n{logs}\"\n            except Exception as\
-          \ e:\n                fail_msg = f\"{fail_msg} (could not fetch pod logs:\
-          \ {e})\"\n            raise RuntimeError(f\"DPO PyTorchJob {job_name} failed\
-          \ and model never appeared in S3: {fail_msg}\")\n\n        raise TimeoutError(f\"\
-          DPO PyTorchJob {job_name} did not complete within {timeout}s\")\n    finally:\n\
-          \        print(f\"[{time.strftime('%H:%M:%S')}] DPO step done. Restoring\
-          \ KServe student model...\")\n        _restore_kserve()\n\n"
+          \      )\n            except Exception:\n                pass\n        \
+          \    return model_output_s3_path\n\n        if job_failed:\n           \
+          \ print(f\"[{time.strftime('%H:%M:%S')}] Waiting for model upload... (elapsed={elapsed}s)\"\
+          )\n            continue\n\n        try:\n            job = custom_api.get_namespaced_custom_object(\n\
+          \                group=\"kubeflow.org\", version=\"v1\", namespace=namespace,\n\
+          \                plural=\"pytorchjobs\", name=job_name,\n            )\n\
+          \        except Exception as e:\n            print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Could not fetch job status ({e}), will retry...\")\n            continue\n\
+          \n        conditions = job.get(\"status\", {}).get(\"conditions\", [])\n\
+          \        for c in conditions:\n            ctype = c.get(\"type\")\n   \
+          \         if ctype == \"Succeeded\" and c.get(\"status\") == \"True\":\n\
+          \                hrs, rem = divmod(elapsed, 3600)\n                mins\
+          \ = rem // 60\n                print(f\"[{time.strftime('%H:%M:%S')}] DPO\
+          \ PyTorchJob {job_name} succeeded ({hrs}h{mins}m)\")\n                return\
+          \ model_output_s3_path\n            if ctype == \"Failed\" and c.get(\"\
+          status\") == \"True\":\n                job_failed = True\n            \
+          \    fail_msg = c.get(\"message\", \"unknown error\")\n                print(f\"\
+          [{time.strftime('%H:%M:%S')}] DPO job {job_name} status=Failed. Continuing\
+          \ to poll S3 for model upload...\")\n                break\n\n        if\
+          \ not job_failed:\n            hrs, rem = divmod(elapsed, 3600)\n      \
+          \      mins = rem // 60\n            print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ DPO PyTorchJob {job_name} running (elapsed={hrs}h{mins}m)\")\n\n    if\
+          \ job_failed:\n        try:\n            pods = core_api.list_namespaced_pod(\n\
+          \                namespace=namespace,\n                label_selector=f\"\
+          training.kubeflow.org/job-name={job_name}\",\n            )\n          \
+          \  if pods.items:\n                pod_name = pods.items[0].metadata.name\n\
+          \                logs = core_api.read_namespaced_pod_log(\n            \
+          \        name=pod_name, namespace=namespace, tail_lines=100,\n         \
+          \       )\n                fail_msg = f\"{fail_msg}\\n\\n--- Pod {pod_name}\
+          \ logs ---\\n{logs}\"\n        except Exception as e:\n            fail_msg\
+          \ = f\"{fail_msg} (could not fetch pod logs: {e})\"\n        raise RuntimeError(f\"\
+          DPO PyTorchJob {job_name} failed and model never appeared in S3: {fail_msg}\"\
+          )\n\n    raise TimeoutError(f\"DPO PyTorchJob {job_name} did not complete\
+          \ within {timeout}s\")\n\n"
         image: python:3.11-slim
     exec-evaluate:
       container:
@@ -745,7 +706,7 @@ deploymentSpec:
           \                    json={\n                        \"model\": teacher_model,\n\
           \                        \"messages\": messages,\n                     \
           \   \"max_tokens\": max_tokens,\n                        \"temperature\"\
-          : temperature,\n                    },\n                    timeout=600,\n\
+          : temperature,\n                    },\n                    timeout=300,\n\
           \                )\n                if resp.status_code == 429 or resp.status_code\
           \ >= 500:\n                    wait = min(2 ** attempt * 5, 120)\n     \
           \               print(f\"  [{resp.status_code}] Server error, waiting {wait}s\
@@ -914,18 +875,17 @@ deploymentSpec:
           ,\n    min_score_gap: int = 1,\n    max_supplement_questions: int = 50,\n\
           ) -> str:\n    \"\"\"Build DPO preference pairs from eval results + supplementary\
           \ question bank queries.\"\"\"\n    import json\n    import os\n    import\
-          \ sys\n    import time\n    import uuid\n    from concurrent.futures import\
-          \ ThreadPoolExecutor\n\n    import boto3\n    import mlflow\n    import\
-          \ requests\n\n    sys.stdout.reconfigure(line_buffering=True)\n\n    print(\"\
-          =\" * 60)\n    print(\"EXTRACT PREFERENCE PAIRS STEP\")\n    print(\"=\"\
-          \ * 60)\n    print(f\"  Student URL:   {student_url}\")\n    print(f\" \
-          \ Teacher API:   {teacher_api_url}\")\n    print(f\"  Teacher model: {teacher_model}\"\
-          )\n    print(f\"  Question bank: {question_bank_s3_path}\")\n    print(f\"\
-          \  Version:       {model_version}\")\n    print(f\"  Min score gap: {min_score_gap}\"\
-          )\n    print(f\"  Max supplement: {max_supplement_questions}\")\n    print(\"\
-          =\" * 60)\n\n    if mlflow_tracking_uri.startswith(\"https://\"):\n    \
-          \    os.environ.setdefault(\"MLFLOW_TRACKING_INSECURE_TLS\", \"true\")\n\
-          \    if s3_endpoint:\n        os.environ.setdefault(\"MLFLOW_S3_ENDPOINT_URL\"\
+          \ sys\n    import time\n    import uuid\n\n    import boto3\n    import\
+          \ mlflow\n    import requests\n\n    sys.stdout.reconfigure(line_buffering=True)\n\
+          \n    print(\"=\" * 60)\n    print(\"EXTRACT PREFERENCE PAIRS STEP\")\n\
+          \    print(\"=\" * 60)\n    print(f\"  Student URL:   {student_url}\")\n\
+          \    print(f\"  Teacher API:   {teacher_api_url}\")\n    print(f\"  Teacher\
+          \ model: {teacher_model}\")\n    print(f\"  Question bank: {question_bank_s3_path}\"\
+          )\n    print(f\"  Version:       {model_version}\")\n    print(f\"  Min\
+          \ score gap: {min_score_gap}\")\n    print(f\"  Max supplement: {max_supplement_questions}\"\
+          )\n    print(\"=\" * 60)\n\n    if mlflow_tracking_uri.startswith(\"https://\"\
+          ):\n        os.environ.setdefault(\"MLFLOW_TRACKING_INSECURE_TLS\", \"true\"\
+          )\n    if s3_endpoint:\n        os.environ.setdefault(\"MLFLOW_S3_ENDPOINT_URL\"\
           , s3_endpoint)\n        os.environ.setdefault(\"AWS_ACCESS_KEY_ID\", s3_access_key)\n\
           \        os.environ.setdefault(\"AWS_SECRET_ACCESS_KEY\", s3_secret_key)\n\
           \n    s3 = boto3.client(\n        \"s3\",\n        endpoint_url=s3_endpoint,\n\
@@ -941,7 +901,7 @@ deploymentSpec:
           \                 json={\n                        \"model\": teacher_model,\n\
           \                        \"messages\": messages,\n                     \
           \   \"max_tokens\": max_tokens,\n                        \"temperature\"\
-          : temperature,\n                    },\n                    timeout=600,\n\
+          : temperature,\n                    },\n                    timeout=300,\n\
           \                )\n                if resp.status_code == 429 or resp.status_code\
           \ >= 500:\n                    wait = min(2 ** attempt * 5, 120)\n     \
           \               print(f\"  [{resp.status_code}] Server error, waiting {wait}s\
@@ -972,7 +932,7 @@ deploymentSpec:
           ,\n                        \"messages\": [{\"role\": \"user\", \"content\"\
           : question}],\n                        \"max_tokens\": 256,\n          \
           \              \"temperature\": 0.3,\n                    },\n         \
-          \           timeout=180,\n                )\n                if resp.status_code\
+          \           timeout=120,\n                )\n                if resp.status_code\
           \ in (400, 404, 503):\n                    wait = min(20 * (attempt + 1),\
           \ 120)\n                    print(f\"    [Student {resp.status_code}] Retry\
           \ {attempt+1}/8 in {wait}s\")\n                    time.sleep(wait)\n  \
@@ -1046,7 +1006,7 @@ deploymentSpec:
           \n    # =====================================================================\n\
           \    # Source B: Supplement from question bank\n    # =====================================================================\n\
           \    print(\"\\n\" + \"=\" * 60)\n    print(\"SOURCE B: Question bank supplement\"\
-          )\n    print(\"=\" * 60)\n    wait_for_student_ready(max_wait=600)\n\n \
+          )\n    print(\"=\" * 60)\n    wait_for_student_ready(max_wait=300)\n\n \
           \   try:\n        print(f\"  Downloading question bank from {question_bank_s3_path}...\"\
           )\n        parts = question_bank_s3_path.replace(\"s3://\", \"\").split(\"\
           /\", 1)\n        qb_bucket, qb_key = parts[0], parts[1]\n        obj = s3.get_object(Bucket=qb_bucket,\
@@ -1061,35 +1021,32 @@ deploymentSpec:
           \ not in existing_prompts]\n        supplement_qs = supplement_qs[:max_supplement_questions]\n\
           \        print(f\"  After dedup, will query {len(supplement_qs)} supplement\
           \ questions\")\n\n        print(f\"  Querying {len(supplement_qs)} questions\
-          \ against Student + Teacher (parallel)...\")\n        source_b_count = 0\n\
-          \        executor = ThreadPoolExecutor(max_workers=2)\n        for i, q\
-          \ in enumerate(supplement_qs):\n            q_preview = q[:80].replace('\\\
+          \ against Student + Teacher...\")\n        source_b_count = 0\n        for\
+          \ i, q in enumerate(supplement_qs):\n            q_preview = q[:80].replace('\\\
           n', ' ')\n            print(f\"    [{i+1}/{len(supplement_qs)}] Querying\
-          \ student + teacher in parallel... ({q_preview}...)\")\n\n            fut_student\
-          \ = executor.submit(query_student, q)\n            fut_teacher = executor.submit(query_teacher,\
-          \ q)\n            student_answer = fut_student.result()\n            teacher_answer\
-          \ = fut_teacher.result()\n\n            if not student_answer:\n       \
-          \         print(f\"    [{i+1}] Student returned empty, skipping\")\n   \
-          \             continue\n            if not teacher_answer:\n           \
-          \     print(f\"    [{i+1}] Teacher returned empty, skipping\")\n       \
-          \         continue\n            print(f\"    [{i+1}] Student={len(student_answer)}ch\
-          \ Teacher={len(teacher_answer)}ch, grading both in parallel...\")\n\n  \
-          \          fut_gs = executor.submit(grade, q, student_answer)\n        \
-          \    fut_gt = executor.submit(grade, q, teacher_answer)\n            student_score\
-          \ = fut_gs.result()\n            teacher_score = fut_gt.result()\n\n   \
-          \         gap = teacher_score - student_score\n            print(f\"   \
-          \ [{i+1}] Student={student_score} Teacher={teacher_score} Gap={gap} {'->\
-          \ PAIR' if gap >= min_score_gap else '-> skip'}\")\n\n            if gap\
-          \ >= min_score_gap:\n                preference_pairs.append({\n       \
-          \             \"prompt\": q,\n                    \"chosen\": teacher_answer,\n\
-          \                    \"rejected\": student_answer,\n                   \
-          \ \"source\": \"question_bank\",\n                    \"score_gap\": gap,\n\
-          \                })\n                source_b_count += 1\n\n           \
-          \ if (i + 1) % 10 == 0:\n                print(f\"  -- Progress: [{i+1}/{len(supplement_qs)}]\
-          \ {source_b_count} pairs collected --\")\n        executor.shutdown(wait=False)\n\
-          \n        print(f\"  Source B: {source_b_count} pairs from question bank\"\
-          )\n    except Exception as exc:\n        import traceback\n        print(f\"\
-          \  Source B failed: {exc}\")\n        traceback.print_exc()\n\n    # =====================================================================\n\
+          \ student... ({q_preview}...)\")\n            student_answer = query_student(q)\n\
+          \            if not student_answer:\n                print(f\"    [{i+1}]\
+          \ Student returned empty, skipping\")\n                continue\n      \
+          \      print(f\"    [{i+1}] Student answered ({len(student_answer)} chars),\
+          \ querying teacher...\")\n            teacher_answer = query_teacher(q)\n\
+          \            if not teacher_answer:\n                print(f\"    [{i+1}]\
+          \ Teacher returned empty, skipping\")\n                continue\n      \
+          \      print(f\"    [{i+1}] Teacher answered ({len(teacher_answer)} chars),\
+          \ grading both...\")\n\n            student_score = grade(q, student_answer)\n\
+          \            teacher_score = grade(q, teacher_answer)\n            gap =\
+          \ teacher_score - student_score\n            print(f\"    [{i+1}] Student={student_score}\
+          \ Teacher={teacher_score} Gap={gap} {'-> PAIR' if gap >= min_score_gap else\
+          \ '-> skip'}\")\n            time.sleep(3)\n\n            if gap >= min_score_gap:\n\
+          \                preference_pairs.append({\n                    \"prompt\"\
+          : q,\n                    \"chosen\": teacher_answer,\n                \
+          \    \"rejected\": student_answer,\n                    \"source\": \"question_bank\"\
+          ,\n                    \"score_gap\": gap,\n                })\n       \
+          \         source_b_count += 1\n\n            if (i + 1) % 10 == 0:\n   \
+          \             print(f\"  -- Progress: [{i+1}/{len(supplement_qs)}] {source_b_count}\
+          \ pairs collected --\")\n\n        print(f\"  Source B: {source_b_count}\
+          \ pairs from question bank\")\n    except Exception as exc:\n        import\
+          \ traceback\n        print(f\"  Source B failed: {exc}\")\n        traceback.print_exc()\n\
+          \n    # =====================================================================\n\
           \    # Write preferences to MinIO\n    # =====================================================================\n\
           \    print(f\"\\n{'=' * 60}\")\n    print(f\"PREFERENCE EXTRACTION COMPLETE\"\
           )\n    print(f\"{'=' * 60}\")\n    print(f\"  Total preference pairs: {len(preference_pairs)}\"\
@@ -1143,96 +1100,62 @@ deploymentSpec:
           \    )\n    apps_api = client.AppsV1Api()\n    custom_api = client.CustomObjectsApi()\n\
           \    core_api = client.CoreV1Api()\n\n    namespace = \"sridharproject\"\
           \n    job_name = f\"finetune-{int(time.time())}\"\n    image = \"quay.io/rh-ee-srpillai/distillation-trainer:v1.1.4\"\
-          \n\n    # --- GPU evacuation and restore helpers ---\n    isvc_deployment\
-          \ = \"code-review-llm-predictor\"\n\n    def _scale_down_kserve():\n   \
-          \     try:\n            dep = apps_api.read_namespaced_deployment(isvc_deployment,\
-          \ namespace)\n            if dep.spec.replicas and dep.spec.replicas > 0:\n\
-          \                print(f\"[{time.strftime('%H:%M:%S')}] Scaling down {isvc_deployment}\
-          \ to free GPU node...\")\n                apps_api.patch_namespaced_deployment_scale(\n\
-          \                    isvc_deployment, namespace, {\"spec\": {\"replicas\"\
-          : 0}},\n                )\n                for _ in range(60):\n       \
-          \             time.sleep(5)\n                    pods = core_api.list_namespaced_pod(\n\
-          \                        namespace, label_selector=f\"app=isvc.{isvc_deployment}\"\
-          ,\n                    )\n                    if not pods.items:\n     \
-          \                   break\n                print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ {isvc_deployment} scaled to 0 -- GPU freed\")\n        except Exception\
-          \ as e:\n            print(f\"[{time.strftime('%H:%M:%S')}] KServe scale-down\
-          \ skipped: {e}\")\n\n    def _restore_kserve():\n        \"\"\"Scale KServe\
-          \ back up and wait until the pod is Ready.\"\"\"\n        try:\n       \
-          \     dep = apps_api.read_namespaced_deployment(isvc_deployment, namespace)\n\
-          \            if (dep.spec.replicas or 0) < 1:\n                print(f\"\
-          [{time.strftime('%H:%M:%S')}] Restoring {isvc_deployment} to 1 replica...\"\
-          )\n                apps_api.patch_namespaced_deployment_scale(\n       \
-          \             isvc_deployment, namespace, {\"spec\": {\"replicas\": 1}},\n\
-          \                )\n            for attempt in range(60):\n            \
-          \    time.sleep(10)\n                pods = core_api.list_namespaced_pod(\n\
-          \                    namespace, label_selector=f\"app=isvc.{isvc_deployment}\"\
-          ,\n                )\n                for pod in pods.items:\n         \
-          \           if all(\n                        cs.ready\n                \
-          \        for cs in (pod.status.container_statuses or [])\n             \
-          \       ):\n                        print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ {isvc_deployment} is Ready (waited {(attempt+1)*10}s)\")\n           \
-          \             return\n                if attempt % 6 == 5:\n           \
-          \         print(f\"[{time.strftime('%H:%M:%S')}] Still waiting for {isvc_deployment}\
-          \ to be Ready... ({(attempt+1)*10}s)\")\n            print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ WARNING: {isvc_deployment} not Ready after 600s, proceeding anyway\")\n\
-          \        except Exception as e:\n            print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ KServe restore failed: {e}\")\n\n    _scale_down_kserve()\n\n    # ---\
-          \ Discover GPU topology from the cluster ---\n    available_gpu_nodes =\
-          \ 0\n    gpus_per_node_list = []\n    blocked_taints = {\"node.kubernetes.io/unreachable\"\
-          , \"node.kubernetes.io/not-ready\"}\n    try:\n        nodes = core_api.list_node(label_selector=\"\
-          nvidia.com/gpu.present=true\")\n        all_pods = core_api.list_pod_for_all_namespaces(field_selector=\"\
-          status.phase=Running\").items\n        gpu_used_per_node = {}\n        for\
-          \ pod in all_pods:\n            node_name = pod.spec.node_name\n       \
-          \     if not node_name:\n                continue\n            for c in\
-          \ (pod.spec.containers or []):\n                req = (c.resources.requests\
-          \ or {}) if c.resources else {}\n                gpu_req = int(req.get(\"\
-          nvidia.com/gpu\", 0))\n                if gpu_req:\n                   \
-          \ gpu_used_per_node[node_name] = gpu_used_per_node.get(node_name, 0) + gpu_req\n\
-          \n        for node in nodes.items:\n            ready = any(\n         \
-          \       c.type == \"Ready\" and c.status == \"True\"\n                for\
+          \n\n    # --- Evacuate GPU consumers before training ---\n    isvc_deployment\
+          \ = \"code-review-llm-predictor\"\n    try:\n        dep = apps_api.read_namespaced_deployment(isvc_deployment,\
+          \ namespace)\n        if dep.spec.replicas and dep.spec.replicas > 0:\n\
+          \            print(f\"[{time.strftime('%H:%M:%S')}] Scaling down {isvc_deployment}\
+          \ to free GPU node...\")\n            apps_api.patch_namespaced_deployment_scale(\n\
+          \                isvc_deployment, namespace, {\"spec\": {\"replicas\": 0}},\n\
+          \            )\n            for _ in range(60):\n                time.sleep(5)\n\
+          \                pods = core_api.list_namespaced_pod(\n                \
+          \    namespace, label_selector=f\"app=isvc.{isvc_deployment}\",\n      \
+          \          )\n                if not pods.items:\n                    break\n\
+          \            print(f\"[{time.strftime('%H:%M:%S')}] {isvc_deployment} scaled\
+          \ to 0 -- GPU freed\")\n    except Exception as e:\n        print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ KServe scale-down skipped: {e}\")\n\n    # --- Discover GPU topology from\
+          \ the cluster ---\n    available_gpu_nodes = 0\n    gpus_per_node_list =\
+          \ []\n    blocked_taints = {\"node.kubernetes.io/unreachable\", \"node.kubernetes.io/not-ready\"\
+          }\n    try:\n        nodes = core_api.list_node(label_selector=\"nvidia.com/gpu.present=true\"\
+          )\n        for node in nodes.items:\n            ready = any(\n        \
+          \        c.type == \"Ready\" and c.status == \"True\"\n                for\
           \ c in (node.status.conditions or [])\n            )\n            tainted\
           \ = any(\n                t.effect in (\"NoSchedule\", \"NoExecute\") and\
           \ t.key in blocked_taints\n                for t in (node.spec.taints or\
           \ [])\n            )\n            if ready and not tainted:\n          \
-          \      gpu_cap = int(node.status.allocatable.get(\"nvidia.com/gpu\", \"\
-          0\"))\n                gpu_used = gpu_used_per_node.get(node.metadata.name,\
-          \ 0)\n                gpu_free = gpu_cap - gpu_used\n                print(f\"\
-          [{time.strftime('%H:%M:%S')}]   Node {node.metadata.name}: {gpu_cap} total,\
-          \ {gpu_used} used, {gpu_free} free\")\n                if gpu_free >= 4:\n\
-          \                    available_gpu_nodes += 1\n                    gpus_per_node_list.append(gpu_free)\n\
-          \                else:\n                    print(f\"[{time.strftime('%H:%M:%S')}]\
-          \   -> Skipping (need 4 free GPUs, only {gpu_free})\")\n    except Exception\
-          \ as e:\n        print(f\"[{time.strftime('%H:%M:%S')}] Could not query\
-          \ nodes ({e}), falling back to 2 nodes x 4 GPUs\")\n        available_gpu_nodes\
-          \ = 2\n        gpus_per_node_list = [4, 4]\n\n    num_gpus_per_node = min(gpus_per_node_list)\
-          \ if gpus_per_node_list else 4\n    num_workers = max(0, available_gpu_nodes\
-          \ - 1)\n    total_gpus = available_gpu_nodes * num_gpus_per_node\n    print(f\"\
-          [{time.strftime('%H:%M:%S')}] GPU topology: {available_gpu_nodes} usable\
-          \ nodes x {num_gpus_per_node} GPUs/node = {total_gpus} total\")\n\n    print(\"\
-          =\" * 60)\n    print(\"SFT FINE-TUNE STEP (PyTorchJob, multi-node multi-GPU)\"\
-          )\n    print(\"=\" * 60)\n    print(f\"  Job name:     {job_name}\")\n \
-          \   print(f\"  Image:        {image}\")\n    print(f\"  Nodes:        1\
-          \ Master + {num_workers} Workers = {available_gpu_nodes} nodes\")\n    print(f\"\
-          \  GPUs/node:    {num_gpus_per_node}\")\n    print(f\"  Total GPUs:   {total_gpus}\"\
-          )\n    print(f\"  Base model:   {base_model_id}\")\n    print(f\"  Gold\
-          \ data:    {gold_data_path}\")\n    print(f\"  Output:       {model_output_s3_path}\"\
-          )\n    print(f\"  Epochs:       {num_epochs}\")\n    print(f\"  Batch size:\
-          \   {batch_size}\")\n    print(f\"  LR:           {learning_rate}\")\n \
-          \   print(f\"  LoRA r/alpha: {lora_r}/{lora_alpha}\")\n    print(\"=\" *\
-          \ 60)\n\n    env_list = [\n        {\"name\": \"GOLD_DATA_PATH\", \"value\"\
-          : gold_data_path},\n        {\"name\": \"MODEL_OUTPUT_S3_PATH\", \"value\"\
-          : model_output_s3_path},\n        {\"name\": \"BASE_MODEL_ID\", \"value\"\
-          : base_model_id},\n        {\"name\": \"NUM_EPOCHS\", \"value\": str(num_epochs)},\n\
-          \        {\"name\": \"BATCH_SIZE\", \"value\": str(batch_size)},\n     \
-          \   {\"name\": \"LEARNING_RATE\", \"value\": str(learning_rate)},\n    \
-          \    {\"name\": \"LORA_R\", \"value\": str(lora_r)},\n        {\"name\"\
-          : \"LORA_ALPHA\", \"value\": str(lora_alpha)},\n        {\"name\": \"S3_ENDPOINT\"\
-          , \"value\": s3_endpoint},\n        {\"name\": \"S3_ACCESS_KEY\", \"value\"\
-          : s3_access_key},\n        {\"name\": \"S3_SECRET_KEY\", \"value\": s3_secret_key},\n\
-          \    ]\n\n    container_spec = {\n        \"name\": \"pytorch\",\n     \
-          \   \"image\": image,\n        \"env\": env_list,\n        \"resources\"\
-          : {\n            \"requests\": {\n                \"nvidia.com/gpu\": str(num_gpus_per_node),\n\
+          \      available_gpu_nodes += 1\n                gpu_cap = int(node.status.capacity.get(\"\
+          nvidia.com/gpu\", \"0\"))\n                gpus_per_node_list.append(gpu_cap)\n\
+          \                print(f\"[{time.strftime('%H:%M:%S')}]   Node {node.metadata.name}:\
+          \ {gpu_cap} GPUs\")\n    except Exception as e:\n        print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Could not query nodes ({e}), falling back to 2 nodes x 4 GPUs\")\n   \
+          \     available_gpu_nodes = 2\n        gpus_per_node_list = [4, 4]\n\n \
+          \   num_gpus_per_node = min(gpus_per_node_list) if gpus_per_node_list else\
+          \ 4\n    num_workers = max(0, available_gpu_nodes - 1)\n    total_gpus =\
+          \ available_gpu_nodes * num_gpus_per_node\n    print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ GPU topology: {available_gpu_nodes} nodes x {num_gpus_per_node} GPUs/node\
+          \ = {total_gpus} total\")\n\n    print(\"=\" * 60)\n    print(\"SFT FINE-TUNE\
+          \ STEP (PyTorchJob, multi-node multi-GPU)\")\n    print(\"=\" * 60)\n  \
+          \  print(f\"  Job name:     {job_name}\")\n    print(f\"  Image:       \
+          \ {image}\")\n    print(f\"  Nodes:        1 Master + {num_workers} Workers\
+          \ = {available_gpu_nodes} nodes\")\n    print(f\"  GPUs/node:    {num_gpus_per_node}\"\
+          )\n    print(f\"  Total GPUs:   {total_gpus}\")\n    print(f\"  Base model:\
+          \   {base_model_id}\")\n    print(f\"  Gold data:    {gold_data_path}\"\
+          )\n    print(f\"  Output:       {model_output_s3_path}\")\n    print(f\"\
+          \  Epochs:       {num_epochs}\")\n    print(f\"  Batch size:   {batch_size}\"\
+          )\n    print(f\"  LR:           {learning_rate}\")\n    print(f\"  LoRA\
+          \ r/alpha: {lora_r}/{lora_alpha}\")\n    print(\"=\" * 60)\n\n    env_list\
+          \ = [\n        {\"name\": \"GOLD_DATA_PATH\", \"value\": gold_data_path},\n\
+          \        {\"name\": \"MODEL_OUTPUT_S3_PATH\", \"value\": model_output_s3_path},\n\
+          \        {\"name\": \"BASE_MODEL_ID\", \"value\": base_model_id},\n    \
+          \    {\"name\": \"NUM_EPOCHS\", \"value\": str(num_epochs)},\n        {\"\
+          name\": \"BATCH_SIZE\", \"value\": str(batch_size)},\n        {\"name\"\
+          : \"LEARNING_RATE\", \"value\": str(learning_rate)},\n        {\"name\"\
+          : \"LORA_R\", \"value\": str(lora_r)},\n        {\"name\": \"LORA_ALPHA\"\
+          , \"value\": str(lora_alpha)},\n        {\"name\": \"S3_ENDPOINT\", \"value\"\
+          : s3_endpoint},\n        {\"name\": \"S3_ACCESS_KEY\", \"value\": s3_access_key},\n\
+          \        {\"name\": \"S3_SECRET_KEY\", \"value\": s3_secret_key},\n    ]\n\
+          \n    container_spec = {\n        \"name\": \"pytorch\",\n        \"image\"\
+          : image,\n        \"env\": env_list,\n        \"resources\": {\n       \
+          \     \"requests\": {\n                \"nvidia.com/gpu\": str(num_gpus_per_node),\n\
           \                \"memory\": \"48Gi\",\n                \"cpu\": \"8\",\n\
           \            },\n            \"limits\": {\n                \"nvidia.com/gpu\"\
           : str(num_gpus_per_node),\n                \"memory\": \"64Gi\",\n     \
@@ -1270,7 +1193,7 @@ deploymentSpec:
           \    timeout = 36000\n    elapsed = 0\n\n    print(f\"[{time.strftime('%H:%M:%S')}]\
           \ Submitted PyTorchJob {job_name} ({available_gpu_nodes} nodes x {num_gpus_per_node}\
           \ GPUs = {total_gpus} total)\")\n    print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ Timeout set to {timeout}s ({timeout/3600:.1f}h)\")\n\n    def _model_s3_timestamp():\n\
+          \ Timeout set to {timeout}s ({timeout/3600:.1f}h)\")\n\n\n    def _model_s3_timestamp():\n\
           \        try:\n            bucket = model_output_s3_path.replace(\"s3://\"\
           , \"\").split(\"/\", 1)[0]\n            prefix = model_output_s3_path.replace(\"\
           s3://\", \"\").split(\"/\", 1)[1]\n            resp = s3.head_object(Bucket=bucket,\
@@ -1279,54 +1202,49 @@ deploymentSpec:
           \ = _model_s3_timestamp()\n\n    def _model_is_new() -> bool:\n        ts\
           \ = _model_s3_timestamp()\n        if ts is None:\n            return False\n\
           \        if model_ts_before is None:\n            return True\n        return\
-          \ ts > model_ts_before\n\n    result = None\n    try:\n        job_failed\
-          \ = False\n        fail_msg = \"\"\n\n        while elapsed < timeout:\n\
-          \            time.sleep(poll_interval)\n            elapsed += poll_interval\n\
-          \n            if _model_is_new():\n                hrs, rem = divmod(elapsed,\
-          \ 3600)\n                mins = rem // 60\n                status = \"Failed\"\
-          \ if job_failed else \"Running/Succeeded\"\n                print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ SFT model updated in S3 (job status={status}, elapsed={hrs}h{mins}m).\
-          \ Success.\")\n                try:\n                    custom_api.delete_namespaced_custom_object(\n\
-          \                        group=\"kubeflow.org\", version=\"v1\", namespace=namespace,\n\
-          \                        plural=\"pytorchjobs\", name=job_name,\n      \
-          \              )\n                except Exception:\n                  \
-          \  pass\n                result = model_output_s3_path\n               \
-          \ return result\n\n            if job_failed:\n                print(f\"\
-          [{time.strftime('%H:%M:%S')}] Waiting for model upload... (elapsed={elapsed}s)\"\
-          )\n                continue\n\n            try:\n                job = custom_api.get_namespaced_custom_object(\n\
+          \ ts > model_ts_before\n\n    job_failed = False\n    fail_msg = \"\"\n\n\
+          \    while elapsed < timeout:\n        time.sleep(poll_interval)\n     \
+          \   elapsed += poll_interval\n\n        if _model_is_new():\n          \
+          \  hrs, rem = divmod(elapsed, 3600)\n            mins = rem // 60\n    \
+          \        status = \"Failed\" if job_failed else \"Running/Succeeded\"\n\
+          \            print(f\"[{time.strftime('%H:%M:%S')}] SFT model updated in\
+          \ S3 (job status={status}, elapsed={hrs}h{mins}m). Success.\")\n       \
+          \     try:\n                custom_api.delete_namespaced_custom_object(\n\
           \                    group=\"kubeflow.org\", version=\"v1\", namespace=namespace,\n\
           \                    plural=\"pytorchjobs\", name=job_name,\n          \
-          \      )\n            except Exception as e:\n                print(f\"\
-          [{time.strftime('%H:%M:%S')}] Could not fetch job status ({e}), will retry...\"\
-          )\n                continue\n\n            conditions = job.get(\"status\"\
-          , {}).get(\"conditions\", [])\n            for c in conditions:\n      \
-          \          ctype = c.get(\"type\")\n                if ctype == \"Succeeded\"\
-          \ and c.get(\"status\") == \"True\":\n                    hrs, rem = divmod(elapsed,\
-          \ 3600)\n                    mins = rem // 60\n                    print(f\"\
-          [{time.strftime('%H:%M:%S')}] PyTorchJob {job_name} succeeded ({hrs}h{mins}m)\"\
-          )\n                    result = model_output_s3_path\n                 \
-          \   return result\n                if ctype == \"Failed\" and c.get(\"status\"\
-          ) == \"True\":\n                    job_failed = True\n                \
-          \    fail_msg = c.get(\"message\", \"unknown error\")\n                \
-          \    print(f\"[{time.strftime('%H:%M:%S')}] SFT job {job_name} status=Failed.\
-          \ Continuing to poll S3 for model upload...\")\n                    break\n\
-          \n            if not job_failed:\n                hrs, rem = divmod(elapsed,\
-          \ 3600)\n                mins = rem // 60\n                print(f\"[{time.strftime('%H:%M:%S')}]\
-          \ PyTorchJob {job_name} running (elapsed={hrs}h{mins}m)\")\n\n        if\
-          \ job_failed:\n            try:\n                pods = core_api.list_namespaced_pod(\n\
-          \                    namespace=namespace,\n                    label_selector=f\"\
-          training.kubeflow.org/job-name={job_name}\",\n                )\n      \
-          \          if pods.items:\n                    pod_name = pods.items[0].metadata.name\n\
-          \                    logs = core_api.read_namespaced_pod_log(\n        \
-          \                name=pod_name, namespace=namespace, tail_lines=100,\n \
-          \                   )\n                    fail_msg = f\"{fail_msg}\\n\\\
-          n--- Pod {pod_name} logs ---\\n{logs}\"\n            except Exception as\
-          \ e:\n                fail_msg = f\"{fail_msg} (could not fetch pod logs:\
-          \ {e})\"\n            raise RuntimeError(f\"PyTorchJob {job_name} failed\
-          \ and model never appeared in S3: {fail_msg}\")\n\n        raise TimeoutError(f\"\
-          PyTorchJob {job_name} did not complete within {timeout}s\")\n    finally:\n\
-          \        print(f\"[{time.strftime('%H:%M:%S')}] SFT step done. Restoring\
-          \ KServe student model...\")\n        _restore_kserve()\n\n"
+          \      )\n            except Exception:\n                pass\n        \
+          \    return model_output_s3_path\n\n        if job_failed:\n           \
+          \ print(f\"[{time.strftime('%H:%M:%S')}] Waiting for model upload... (elapsed={elapsed}s)\"\
+          )\n            continue\n\n        try:\n            job = custom_api.get_namespaced_custom_object(\n\
+          \                group=\"kubeflow.org\", version=\"v1\", namespace=namespace,\n\
+          \                plural=\"pytorchjobs\", name=job_name,\n            )\n\
+          \        except Exception as e:\n            print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Could not fetch job status ({e}), will retry...\")\n            continue\n\
+          \n        conditions = job.get(\"status\", {}).get(\"conditions\", [])\n\
+          \        for c in conditions:\n            ctype = c.get(\"type\")\n   \
+          \         if ctype == \"Succeeded\" and c.get(\"status\") == \"True\":\n\
+          \                hrs, rem = divmod(elapsed, 3600)\n                mins\
+          \ = rem // 60\n                print(f\"[{time.strftime('%H:%M:%S')}] PyTorchJob\
+          \ {job_name} succeeded ({hrs}h{mins}m)\")\n                return model_output_s3_path\n\
+          \            if ctype == \"Failed\" and c.get(\"status\") == \"True\":\n\
+          \                job_failed = True\n                fail_msg = c.get(\"\
+          message\", \"unknown error\")\n                print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ SFT job {job_name} status=Failed. Continuing to poll S3 for model upload...\"\
+          )\n                break\n\n        if not job_failed:\n            hrs,\
+          \ rem = divmod(elapsed, 3600)\n            mins = rem // 60\n          \
+          \  print(f\"[{time.strftime('%H:%M:%S')}] PyTorchJob {job_name} running\
+          \ (elapsed={hrs}h{mins}m)\")\n\n    if job_failed:\n        try:\n     \
+          \       pods = core_api.list_namespaced_pod(\n                namespace=namespace,\n\
+          \                label_selector=f\"training.kubeflow.org/job-name={job_name}\"\
+          ,\n            )\n            if pods.items:\n                pod_name =\
+          \ pods.items[0].metadata.name\n                logs = core_api.read_namespaced_pod_log(\n\
+          \                    name=pod_name, namespace=namespace, tail_lines=100,\n\
+          \                )\n                fail_msg = f\"{fail_msg}\\n\\n--- Pod\
+          \ {pod_name} logs ---\\n{logs}\"\n        except Exception as e:\n     \
+          \       fail_msg = f\"{fail_msg} (could not fetch pod logs: {e})\"\n   \
+          \     raise RuntimeError(f\"PyTorchJob {job_name} failed and model never\
+          \ appeared in S3: {fail_msg}\")\n\n    raise TimeoutError(f\"PyTorchJob\
+          \ {job_name} did not complete within {timeout}s\")\n\n"
         image: python:3.11-slim
     exec-resolve-version:
       container:

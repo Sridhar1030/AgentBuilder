@@ -25,6 +25,7 @@ Environment Variables:
 import json
 import os
 import shutil
+import time
 
 import boto3
 import mlflow  # mlflow-skinny at runtime
@@ -190,8 +191,27 @@ def run_sft(s3):
     dataset = Dataset.from_list(records)
     print(f"Loaded {len(dataset)} training samples from {gold_data_path}")
 
-    print(f"Loading base model: {base_model_id}")
-    model, tokenizer = load_model_and_tokenizer(base_model_id)
+    local_model_id = base_model_id
+    if base_model_id.startswith("s3://"):
+        local_model_id = "/tmp/prev-model"
+        if local_rank() == 0:
+            if os.path.exists(local_model_id):
+                shutil.rmtree(local_model_id)
+            os.makedirs(local_model_id, exist_ok=True)
+            print(f"Downloading previous model from {base_model_id} (iterative SFT)...")
+            download_s3_dir(s3, base_model_id, local_model_id)
+            with open(os.path.join(local_model_id, ".download_done"), "w") as f:
+                f.write("ok")
+        else:
+            print(f"[Rank {local_rank()}] Waiting for local_rank 0 to download model...")
+            while not os.path.exists(os.path.join(local_model_id, ".download_done")):
+                time.sleep(2)
+            print(f"[Rank {local_rank()}] Model download complete, proceeding.")
+    else:
+        print(f"Starting from HuggingFace base model: {base_model_id}")
+
+    print(f"Loading model: {local_model_id}")
+    model, tokenizer = load_model_and_tokenizer(local_model_id)
 
     lora_config = LoraConfig(
         r=lora_r,
@@ -219,7 +239,7 @@ def run_sft(s3):
         gradient_checkpointing_kwargs={"use_reentrant": False},
         ddp_find_unused_parameters=False,
         report_to=["mlflow"],
-        run_name=f"sft-{base_model_id.split('/')[-1]}-{num_epochs}ep",
+        run_name=f"sft-{local_model_id.split('/')[-1]}-{num_epochs}ep",
     )
 
     trainer = SFTTrainer(
@@ -237,14 +257,15 @@ def run_sft(s3):
 
     if is_main_process():
         output_dir = "/tmp/student-merged"
-        merge_and_save(model, base_model_id, output_dir)
+        merge_and_save(model, local_model_id, output_dir)
         upload_model_to_s3(s3, output_dir, model_output_s3_path)
     else:
         print(f"[Rank {local_rank()}] Training done. Waiting for rank 0 to merge & upload.")
 
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
-        print(f"[Rank {local_rank()}] All ranks synced. Exiting.")
+        print(f"[Rank {local_rank()}] All ranks synced. Clean exit.")
+        os._exit(0)
 
 
 # =========================================================================
@@ -294,15 +315,23 @@ def run_dpo(s3):
     dataset = Dataset.from_list(records)
     print(f"Loaded {len(dataset)} preference pairs from {pref_data_path}")
 
-    # If BASE_MODEL_ID is an S3 path, download it locally first
     local_model_id = base_model_id
     if base_model_id.startswith("s3://"):
         local_model_id = "/tmp/sft-model"
-        if os.path.exists(local_model_id):
-            shutil.rmtree(local_model_id)
-        os.makedirs(local_model_id, exist_ok=True)
-        print(f"Downloading SFT model from {base_model_id}...")
-        download_s3_dir(s3, base_model_id, local_model_id)
+        marker = os.path.join(local_model_id, ".download_done")
+        if local_rank() == 0:
+            if os.path.exists(local_model_id):
+                shutil.rmtree(local_model_id)
+            os.makedirs(local_model_id, exist_ok=True)
+            print(f"Downloading SFT model from {base_model_id} (DPO base)...")
+            download_s3_dir(s3, base_model_id, local_model_id)
+            with open(marker, "w") as f:
+                f.write("ok")
+        else:
+            print(f"[Rank {local_rank()}] Waiting for local_rank 0 to download DPO base model...")
+            while not os.path.exists(marker):
+                time.sleep(2)
+            print(f"[Rank {local_rank()}] DPO base model download complete, proceeding.")
 
     print(f"Loading SFT model for DPO: {local_model_id}")
     bnb_config = BitsAndBytesConfig(
@@ -334,11 +363,20 @@ def run_dpo(s3):
 
     setup_mlflow("dpo")
 
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    samples_per_rank = max(1, len(dataset) // max(1, world_size))
+    min_steps_per_epoch = 2
+    grad_accum = max(1, samples_per_rank // (min_steps_per_epoch * batch_size))
+    grad_accum = min(grad_accum, 4)
+    est_steps = (samples_per_rank // (batch_size * grad_accum)) * num_epochs
+    print(f"DPO scaling: world_size={world_size}, samples/rank={samples_per_rank}, "
+          f"grad_accum={grad_accum}, est_optimizer_steps={est_steps}")
+
     dpo_args = DPOConfig(
         output_dir="/tmp/dpo-checkpoints",
         num_train_epochs=num_epochs,
         per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=grad_accum,
         learning_rate=learning_rate,
         beta=dpo_beta,
         fp16=True,
@@ -346,8 +384,8 @@ def run_dpo(s3):
         save_strategy="epoch",
         warmup_ratio=0.1,
         remove_unused_columns=False,
-        max_length=512,
-        max_prompt_length=256,
+        max_length=1024,
+        max_prompt_length=512,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         ddp_find_unused_parameters=False,
@@ -412,7 +450,8 @@ def run_dpo(s3):
 
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
-        print(f"[Rank {local_rank()}] All ranks synced. Exiting.")
+        print(f"[Rank {local_rank()}] All ranks synced. Clean exit.")
+        os._exit(0)
 
 
 # =========================================================================

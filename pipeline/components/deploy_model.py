@@ -45,6 +45,7 @@ def deploy_model(
     patch_body = {
         "spec": {
             "predictor": {
+                "minReplicas": 1,
                 "model": {
                     "storageUri": storage_uri,
                 }
