@@ -1568,7 +1568,7 @@ root:
         componentRef:
           name: comp-collect-human-feedback
         dependentTasks:
-        - extract-code-review-gold
+        - deploy-model
         inputs:
           parameters:
             s3_access_key:

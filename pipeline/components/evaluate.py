@@ -68,15 +68,20 @@ def evaluate(
     print("=" * 60)
 
     GRADING_PROMPT = (
-        "You are an expert code review grader. Rate the following AI-generated code review "
-        "on a scale of 1 to 10 based on these criteria:\n"
-        "- Issue identification: Did it find the real problem (not a hallucinated one)?\n"
-        "- Technical accuracy: Is the explanation correct?\n"
-        "- Actionability: Is the suggestion concrete and implementable?\n"
-        "- Severity accuracy: Is the severity rating appropriate?\n"
-        "- False positive avoidance: Did it avoid flagging non-issues?\n"
-        "A score of 1 means completely wrong or hallucinated issues. "
-        "A score of 10 means a perfect, reviewer-quality response.\n"
+        "You are grading an AI-generated code review comment as it would appear in a "
+        "GitHub Pull Request. Rate it 1-10 based on how useful it would be to a developer "
+        "reading their PR:\n be harsh and critical. If you think the code is bad, give it a 1."
+        "- Correct identification: Does it spot the actual issue in the diff (not a hallucinated one)?\n"
+        "- Conciseness: Is it brief and to-the-point, like a real PR comment? "
+        "Verbose essays are BAD -- reviewers want short, clear feedback.\n"
+        "- Actionability: Does it tell the developer exactly what to fix, "
+        "ideally with a code suggestion?\n"
+        "- False positive avoidance: If the code is fine, does it correctly say so "
+        "instead of inventing problems?\n"
+        "- Relevance: Does it focus on the changed lines, not lecture about unrelated topics?\n"
+        "A score of 1 means hallucinated issues or completely irrelevant rambling. "
+        "A score of 5 means verbose but technically correct. "
+        "A score of 10 means a perfect, concise, actionable PR comment a senior engineer would leave.\n"
         'Respond with ONLY a JSON object: {"score": <number>, "reason": "<brief reason>"}'
     )
 
@@ -218,6 +223,50 @@ def evaluate(
     print(f"  Score Gap:   {teacher_avg - student_avg:.2f}")
     print("=" * 60)
 
+    # ── Load baseline scores from MinIO for comparison ─────────────────
+    import boto3
+
+    baseline_avg = None
+    baseline_per_q = {}
+    try:
+        s3c = boto3.client(
+            "s3",
+            endpoint_url=s3_endpoint,
+            aws_access_key_id=s3_access_key,
+            aws_secret_access_key=s3_secret_key,
+        )
+        obj = s3c.get_object(Bucket="mlflow-artifacts", Key="baseline/scores.json")
+        baseline = json.loads(obj["Body"].read().decode())
+        baseline_avg = baseline["baseline_avg_score"]
+        for pq in baseline.get("per_question", []):
+            baseline_per_q[pq["q_index"]] = pq["student_score"]
+        print(f"\n  Baseline loaded: avg={baseline_avg}/10 ({len(baseline_per_q)} questions)")
+    except Exception as e:
+        print(f"\n  Baseline not found ({e}) -- skipping comparison")
+
+    # ── Comparison table ─────────────────────────────────────────────────
+    if baseline_avg is not None:
+        improvement = student_avg - baseline_avg
+        improvement_pct = (improvement / baseline_avg * 100) if baseline_avg > 0 else 0.0
+        print("\n" + "=" * 60)
+        print("BASELINE vs TRAINED COMPARISON")
+        print("=" * 60)
+        print(f"  {'Q#':<4} {'Baseline':>10} {'Trained':>10} {'Teacher':>10} {'Δ':>8}")
+        print(f"  {'─'*4} {'─'*10} {'─'*10} {'─'*10} {'─'*8}")
+        for i, r in enumerate(results):
+            b_score = baseline_per_q.get(i + 1, "—")
+            delta = ""
+            if isinstance(b_score, (int, float)):
+                delta = f"{r['student_score'] - b_score:+.1f}"
+            print(f"  Q{i+1:<3} {str(b_score):>8}/10 {r['student_score']:>8}/10 {r['teacher_score']:>8}/10 {delta:>8}")
+        print(f"  {'─'*4} {'─'*10} {'─'*10} {'─'*10} {'─'*8}")
+        print(f"  {'AVG':<4} {baseline_avg:>8.2f}/10 {student_avg:>8.2f}/10 {teacher_avg:>8.2f}/10 {improvement:>+7.2f}")
+        print(f"\n  Improvement over baseline: {improvement:+.2f} ({improvement_pct:+.1f}%)")
+        print("=" * 60)
+    else:
+        improvement = None
+        improvement_pct = None
+
     # Log to MLflow
     if mlflow_tracking_uri:
         mlflow.set_tracking_uri(mlflow_tracking_uri)
@@ -228,6 +277,10 @@ def evaluate(
             mlflow.log_metric("student_avg_score", round(student_avg, 4))
             mlflow.log_metric("teacher_avg_score", round(teacher_avg, 4))
             mlflow.log_metric("score_gap", round(teacher_avg - student_avg, 4))
+            if baseline_avg is not None:
+                mlflow.log_metric("baseline_avg_score", round(baseline_avg, 4))
+                mlflow.log_metric("improvement_over_baseline", round(improvement, 4))
+                mlflow.log_metric("improvement_pct", round(improvement_pct, 2))
             for i, r in enumerate(results):
                 mlflow.log_metric(f"q{i+1}_student_score", r["student_score"])
                 mlflow.log_metric(f"q{i+1}_teacher_score", r["teacher_score"])
@@ -241,5 +294,8 @@ def evaluate(
         "student_avg_score": round(student_avg, 2),
         "teacher_avg_score": round(teacher_avg, 2),
         "score_gap": round(teacher_avg - student_avg, 2),
+        "baseline_avg_score": round(baseline_avg, 2) if baseline_avg is not None else None,
+        "improvement_over_baseline": round(improvement, 2) if improvement is not None else None,
+        "improvement_pct": round(improvement_pct, 1) if improvement_pct is not None else None,
         "results": results,
     }

@@ -27,6 +27,8 @@ from kfp import dsl, compiler
 from components.resolve_version import resolve_version
 from components.finetune import finetune
 from components.extract_preferences import extract_preferences
+from components.collect_human_feedback import collect_human_feedback
+from components.merge_preferences import merge_preferences
 from components.dpo_finetune import dpo_finetune
 from components.deploy_model import deploy_model
 from components.evaluate import evaluate
@@ -208,7 +210,17 @@ def code_review_pipeline(
     )
     deploy_sft_task.set_caching_options(False)
 
-    # Step 4 -- Extract DPO preference pairs (teacher vs deployed SFT on diff-bank)
+    # Step 4a -- Collect human feedback DPO pairs from MinIO (runs early,
+    #            parallel with SFT+deploy since it only reads from S3)
+    human_fb_task = collect_human_feedback(
+        s3_endpoint=S3_ENDPOINT,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+    )
+    human_fb_task.after(extract_task)
+    human_fb_task.set_caching_options(False)
+
+    # Step 4b -- Extract DPO preference pairs (teacher vs deployed SFT on diff-bank)
     pref_task = extract_preferences(
         student_url=f"http://{ISVC_NAME}-predictor.{NAMESPACE}.svc.cluster.local:8080",
         teacher_api_url=teacher_api_url,
@@ -226,10 +238,20 @@ def code_review_pipeline(
     pref_task.after(deploy_sft_task)
     pref_task.set_caching_options(False)
 
-    # Step 5 -- DPO fine-tune (refine SFT model with preference data)
+    # Step 4c -- Merge pipeline preferences + human feedback
+    merge_task = merge_preferences(
+        pipeline_pref_path=pref_task.output,
+        human_feedback_path=human_fb_task.output,
+        s3_endpoint=S3_ENDPOINT,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+    )
+    merge_task.set_caching_options(False)
+
+    # Step 5 -- DPO fine-tune (refine SFT model with merged preference data)
     dpo_task = dpo_finetune(
         sft_model_s3_path=sft_task.output,
-        pref_data_s3_path=pref_task.output,
+        pref_data_s3_path=merge_task.output,
         model_version=version_task.outputs["version"],
         s3_endpoint=S3_ENDPOINT,
         s3_access_key=s3_access_key,
