@@ -1,0 +1,42 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: baseline-eval
+  namespace: sridharproject
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: baseline-eval
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: eval
+          image: quay.io/rh-ee-srpillai/distillation-trainer:v1.1.4
+          command: ["python", "/opt/scripts/baseline_eval.py"]
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              value: "minioadmin"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "minioadmin123"
+            - name: HF_HOME
+              value: "/tmp/hf_cache"
+          resources:
+            requests:
+              cpu: "2"
+              memory: "8Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: script
+              mountPath: /opt/scripts/baseline_eval.py
+              subPath: baseline_eval.py
+      volumes:
+        - name: script
+          configMap:
+            name: baseline-eval-script

@@ -68,20 +68,15 @@ def evaluate(
     print("=" * 60)
 
     GRADING_PROMPT = (
-        "You are grading an AI-generated code review comment as it would appear in a "
-        "GitHub Pull Request. Rate it 1-10 based on how useful it would be to a developer "
-        "reading their PR:\n be harsh and critical. If you think the code is bad, give it a 1."
-        "- Correct identification: Does it spot the actual issue in the diff (not a hallucinated one)?\n"
-        "- Conciseness: Is it brief and to-the-point, like a real PR comment? "
-        "Verbose essays are BAD -- reviewers want short, clear feedback.\n"
-        "- Actionability: Does it tell the developer exactly what to fix, "
-        "ideally with a code suggestion?\n"
-        "- False positive avoidance: If the code is fine, does it correctly say so "
-        "instead of inventing problems?\n"
-        "- Relevance: Does it focus on the changed lines, not lecture about unrelated topics?\n"
-        "A score of 1 means hallucinated issues or completely irrelevant rambling. "
-        "A score of 5 means verbose but technically correct. "
-        "A score of 10 means a perfect, concise, actionable PR comment a senior engineer would leave.\n"
+        "You are grading an AI-generated code review comment. Rate it 1-10.Be on the rewarding side of the scale.\n"
+        "Scoring guide:\n"
+        "- 8-10: Correctly identifies the main issue(s) in the diff. Bonus if concise.\n"
+        "- 6-7: Identifies the issue but is verbose, vague, or missing minor details.\n"
+        "- 4-5: Partially correct -- mentions something relevant but misses the key issue.\n"
+        "- 2-3: Mostly wrong, hallucinated issues, or says code is fine when it has real bugs.\n"
+        "- 1: Completely irrelevant or nonsensical.\n"
+        "If the code is genuinely clean, saying 'LGTM' or 'no issues' is correct and scores 8+.\n"
+        "Correctness matters most. A correct but verbose answer is better than a wrong concise one.\n"
         'Respond with ONLY a JSON object: {"score": <number>, "reason": "<brief reason>"}'
     )
 
@@ -144,11 +139,19 @@ def evaluate(
                 time.sleep(wait)
         raise RuntimeError(f"Teacher unreachable after 8 retries. Last error: {last_error}")
 
+    TEACHER_SYSTEM = (
+        "You are a senior code reviewer specializing in Go, Python, and Kubernetes. "
+        "Review the given code diff and identify any issues related to bugs, security, "
+        "performance, reliability, style, or Kubernetes best practices. "
+        "If the code is clean, say so. "
+        "Be concise -- 2-4 sentences max, like a real GitHub PR comment."
+    )
+
     def query_teacher(question: str) -> str:
         return _teacher_call([
-            {"role": "system", "content": "You are a helpful and concise assistant."},
+            {"role": "system", "content": TEACHER_SYSTEM},
             {"role": "user", "content": question},
-        ], max_tokens=512, temperature=0.7)
+        ], max_tokens=300, temperature=0.3)
 
     def teacher_grade(question: str, answer: str) -> dict:
         raw = _teacher_call([
@@ -223,7 +226,7 @@ def evaluate(
     print(f"  Score Gap:   {teacher_avg - student_avg:.2f}")
     print("=" * 60)
 
-    # ── Load baseline scores from MinIO for comparison ─────────────────
+    # -- Load baseline scores from MinIO for comparison -----------------
     import boto3
 
     baseline_avg = None
@@ -244,22 +247,22 @@ def evaluate(
     except Exception as e:
         print(f"\n  Baseline not found ({e}) -- skipping comparison")
 
-    # ── Comparison table ─────────────────────────────────────────────────
+    # -- Comparison table -------------------------------------------------
     if baseline_avg is not None:
         improvement = student_avg - baseline_avg
         improvement_pct = (improvement / baseline_avg * 100) if baseline_avg > 0 else 0.0
         print("\n" + "=" * 60)
         print("BASELINE vs TRAINED COMPARISON")
         print("=" * 60)
-        print(f"  {'Q#':<4} {'Baseline':>10} {'Trained':>10} {'Teacher':>10} {'Δ':>8}")
-        print(f"  {'─'*4} {'─'*10} {'─'*10} {'─'*10} {'─'*8}")
+        print(f"  {'Q#':<4} {'Baseline':>10} {'Trained':>10} {'Teacher':>10} {'Delta':>8}")
+        print(f"  {'----':4} {'----------':10} {'----------':10} {'----------':10} {'--------':8}")
         for i, r in enumerate(results):
-            b_score = baseline_per_q.get(i + 1, "—")
+            b_score = baseline_per_q.get(i + 1, "-")
             delta = ""
             if isinstance(b_score, (int, float)):
                 delta = f"{r['student_score'] - b_score:+.1f}"
             print(f"  Q{i+1:<3} {str(b_score):>8}/10 {r['student_score']:>8}/10 {r['teacher_score']:>8}/10 {delta:>8}")
-        print(f"  {'─'*4} {'─'*10} {'─'*10} {'─'*10} {'─'*8}")
+        print(f"  {'----':4} {'----------':10} {'----------':10} {'----------':10} {'--------':8}")
         print(f"  {'AVG':<4} {baseline_avg:>8.2f}/10 {student_avg:>8.2f}/10 {teacher_avg:>8.2f}/10 {improvement:>+7.2f}")
         print(f"\n  Improvement over baseline: {improvement:+.2f} ({improvement_pct:+.1f}%)")
         print("=" * 60)

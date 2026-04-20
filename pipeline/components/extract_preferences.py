@@ -34,7 +34,7 @@ def extract_preferences(
     s3_secret_key: str,
     pref_output_bucket: str = "mlflow-artifacts",
     min_score_gap: int = 1,
-    max_supplement_questions: int = 50,
+    max_supplement_questions: int = 5,
 ) -> str:
     """Build DPO preference pairs from eval results + supplementary question bank queries."""
     import json
@@ -159,22 +159,35 @@ def extract_preferences(
         print("    [Student] All retries exhausted, returning empty")
         return ""
 
+    TEACHER_SYSTEM = (
+        "You are a senior code reviewer specializing in Go, Python, and Kubernetes. "
+        "Review the given code diff and identify any issues related to bugs, security, "
+        "performance, reliability, style, or Kubernetes best practices. "
+        "If the code is clean, say so. "
+        "Be concise -- 2-4 sentences max, like a real GitHub PR comment."
+    )
+
     def query_teacher(question: str) -> str:
         return teacher_llm_call([
-            {"role": "system", "content": "You are a helpful and concise assistant."},
+            {"role": "system", "content": TEACHER_SYSTEM},
             {"role": "user", "content": question},
-        ], max_tokens=512, temperature=0.7)
+        ], max_tokens=300, temperature=0.3)
 
     GRADING_PROMPT = (
-        "You are an expert code review grader. Rate the following AI-generated code review "
-        "on a scale of 1 to 10 based on these criteria:\n"
-        "- Issue identification: Did it find the real problem (not a hallucinated one)?\n"
-        "- Technical accuracy: Is the explanation correct?\n"
-        "- Actionability: Is the suggestion concrete and implementable?\n"
-        "- Severity accuracy: Is the severity rating appropriate?\n"
-        "- False positive avoidance: Did it avoid flagging non-issues?\n"
-        "A score of 1 means completely wrong or hallucinated issues. "
-        "A score of 10 means a perfect, reviewer-quality response.\n"
+        "You are grading an AI-generated code review comment as it would appear in a "
+        "GitHub Pull Request. Rate it 1-10 based on how useful it would be to a developer "
+        "reading their PR:\n be harsh and critical. If you think the code is bad, give it a 1."
+        "- Correct identification: Does it spot the actual issue in the diff (not a hallucinated one)?\n"
+        "- Conciseness: Is it brief and to-the-point, like a real PR comment? "
+        "Verbose essays are BAD -- reviewers want short, clear feedback.\n"
+        "- Actionability: Does it tell the developer exactly what to fix, "
+        "ideally with a code suggestion?\n"
+        "- False positive avoidance: If the code is fine, does it correctly say so "
+        "instead of inventing problems?\n"
+        "- Relevance: Does it focus on the changed lines, not lecture about unrelated topics?\n"
+        "A score of 1 means hallucinated issues or completely irrelevant rambling. "
+        "A score of 5 means verbose but technically correct. "
+        "A score of 10 means a perfect, concise, actionable PR comment a senior engineer would leave.\n"
         'Respond with ONLY a JSON object: {"score": <number>, "reason": "<brief reason>"}'
     )
 

@@ -33,12 +33,12 @@ from components.dpo_finetune import dpo_finetune
 from components.deploy_model import deploy_model
 from components.evaluate import evaluate
 
-# ── Cluster config ──────────────────────────────────────────────────────
+# -- Cluster config -------------------------------------------------------
 NAMESPACE = "sridharproject"
 S3_ENDPOINT = "http://minio.sridharproject.svc.cluster.local:9000"
 MLFLOW_URI = "http://mlflow.sridharproject.svc.cluster.local:5000"
 
-# ── Phase 3 isolation ───────────────────────────────────────────────────
+# -- Phase 3 isolation ----------------------------------------------------
 ISVC_NAME = "code-review-llm"
 BASE_MODEL_ID = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
 
@@ -49,7 +49,7 @@ SYNTHETIC_PREFIX = "synthetic/code-review/"
 CURSOR_KEY = "code-review-interactions/.cursor.json"
 QUESTION_BANK_S3 = "s3://mlflow-artifacts/synthetic/code-review/diff-bank.json"
 
-# ── 15 curated test diffs from kubeflow/trainer for quick regression ────
+# -- 15 curated test diffs from kubeflow/trainer for quick regression -----
 TEST_QUESTIONS = [
     # Bug detection (3)
     "Review the following code diff and identify any issues:\n\nFile: pkg/controller/job_controller.go\nLanguage: Go\n\n```diff\n@@ -189,7 +189,7 @@\n func (p *Progress) buildProgressServerCaCrtConfigMap(ctx context.Context, trainJob *trainer.TrainJob) (*corev1ac.ConfigMapApplyConfiguration, error) {\n \tsecret := &corev1.Secret{}\n \tif err := p.client.Get(ctx, secretKey, secret); err == nil {\n \t\tif _, ok := secret.Data[\"ca.crt\"]; !ok {\n-\t\t\treturn nil, fmt.Errorf(\"ca.crt not found: %w\", err)\n+\t\t\treturn nil, fmt.Errorf(\"ca.crt not found in TLS secret\")\n \t\t}\n```",
@@ -159,10 +159,10 @@ def code_review_pipeline(
     teacher_model: str = "qwen2.5-coder:32b-instruct-q4_K_M",
     teacher_api_key: str = "",
     num_epochs: int = 3,
-    dpo_epochs: int = 3,
-    dpo_beta: float = 0.1,
+    dpo_epochs: int = 1,
+    dpo_beta: float = 0.3,
     min_dpo_pairs: int = 3,
-    max_supplement_questions: int = 50,
+    max_supplement_questions: int = 5,
 ):
     # Step 0 -- Resolve version (auto-increment code-review-1.5b-vN)
     version_task = resolve_version(
@@ -238,10 +238,11 @@ def code_review_pipeline(
     pref_task.after(deploy_sft_task)
     pref_task.set_caching_options(False)
 
-    # Step 4c -- Merge pipeline preferences + human feedback
+    # Step 4c -- Merge all preference sources (static bank + live + human + SFT regularization)
     merge_task = merge_preferences(
         pipeline_pref_path=pref_task.output,
         human_feedback_path=human_fb_task.output,
+        gold_data_path=extract_task.output,
         s3_endpoint=S3_ENDPOINT,
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,

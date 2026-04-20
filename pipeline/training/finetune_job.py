@@ -169,12 +169,17 @@ def setup_mlflow(mode: str):
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "")
     if not tracking_uri:
         tracking_uri = "http://mlflow.sridharproject.svc.cluster.local:5000"
+    s3_endpoint = os.environ.get("S3_ENDPOINT", "http://minio.sridharproject.svc.cluster.local:9000")
     mlflow.set_tracking_uri(tracking_uri)
     experiment_name = "CodeReview-Training"
     mlflow.set_experiment(experiment_name)
     os.environ["MLFLOW_TRACKING_URI"] = tracking_uri
+    os.environ["MLFLOW_S3_ENDPOINT_URL"] = s3_endpoint
+    os.environ.setdefault("AWS_ACCESS_KEY_ID", os.environ.get("S3_ACCESS_KEY", "minioadmin"))
+    os.environ.setdefault("AWS_SECRET_ACCESS_KEY", os.environ.get("S3_SECRET_KEY", "minioadmin123"))
     os.environ["HF_MLFLOW_LOG_ARTIFACTS"] = "false"
     print(f"MLflow tracking: {tracking_uri}, experiment: {experiment_name}, mode: {mode}")
+    print(f"MLflow S3 endpoint: {s3_endpoint}")
 
 
 def run_sft(s3):

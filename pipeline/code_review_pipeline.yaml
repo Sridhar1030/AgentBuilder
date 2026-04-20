@@ -2,9 +2,9 @@
 # Name: code-review-slm
 # Description: Code Review SLM: SFT + DPO distillation on Go/Python/K8s code diffs using Qwen2.5-Coder-1.5B.
 # Inputs:
-#    dpo_beta: float [Default: 0.1]
-#    dpo_epochs: int [Default: 3.0]
-#    max_supplement_questions: int [Default: 50.0]
+#    dpo_beta: float [Default: 0.3]
+#    dpo_epochs: int [Default: 1.0]
+#    max_supplement_questions: int [Default: 5.0]
 #    min_dpo_pairs: int [Default: 3.0]
 #    model_version: str [Default: '']
 #    num_epochs: int [Default: 3.0]
@@ -171,7 +171,7 @@ components:
     inputDefinitions:
       parameters:
         max_supplement_questions:
-          defaultValue: 50.0
+          defaultValue: 5.0
           isOptional: true
           parameterType: NUMBER_INTEGER
         min_score_gap:
@@ -256,6 +256,8 @@ components:
           defaultValue: mlflow-artifacts
           isOptional: true
           parameterType: STRING
+        gold_data_path:
+          parameterType: STRING
         human_feedback_path:
           parameterType: STRING
         pipeline_pref_path:
@@ -266,6 +268,18 @@ components:
           parameterType: STRING
         s3_secret_key:
           parameterType: STRING
+        sft_mix_ratio:
+          defaultValue: 0.15
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+        static_bank_key:
+          defaultValue: preferences/static-bank/preference-bank.jsonl
+          isOptional: true
+          parameterType: STRING
+        static_bank_sample_size:
+          defaultValue: 300.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
     outputDefinitions:
       parameters:
         Output:
@@ -570,7 +584,7 @@ deploymentSpec:
           \ Sufficient pairs. Proceeding with DPO training.\")\n\n    config.load_incluster_config()\n\
           \    apps_api = client.AppsV1Api()\n    custom_api = client.CustomObjectsApi()\n\
           \    core_api = client.CoreV1Api()\n\n    namespace = \"sridharproject\"\
-          \n    job_name = f\"dpo-{int(time.time())}\"\n    image = \"quay.io/rh-ee-srpillai/distillation-trainer:v1.1.4\"\
+          \n    job_name = f\"dpo-{int(time.time())}\"\n    image = \"image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.1.5\"\
           \n\n    # --- GPU evacuation and restore helpers ---\n    isvc_deployment\
           \ = \"code-review-llm-predictor\"\n\n    def _scale_down_kserve():\n   \
           \     try:\n            dep = apps_api.read_namespaced_deployment(isvc_deployment,\
@@ -810,20 +824,22 @@ deploymentSpec:
           )\n    print(f\"  Model version: {model_version}\")\n    print(f\"  Questions:\
           \     {len(test_questions)}\")\n    print(f\"  MLflow URI:    {mlflow_tracking_uri\
           \ or '(not set)'}\")\n    print(\"=\" * 60)\n\n    GRADING_PROMPT = (\n\
-          \        \"You are an expert code review grader. Rate the following AI-generated\
-          \ code review \"\n        \"on a scale of 1 to 10 based on these criteria:\\\
-          n\"\n        \"- Issue identification: Did it find the real problem (not\
-          \ a hallucinated one)?\\n\"\n        \"- Technical accuracy: Is the explanation\
-          \ correct?\\n\"\n        \"- Actionability: Is the suggestion concrete and\
-          \ implementable?\\n\"\n        \"- Severity accuracy: Is the severity rating\
-          \ appropriate?\\n\"\n        \"- False positive avoidance: Did it avoid\
-          \ flagging non-issues?\\n\"\n        \"A score of 1 means completely wrong\
-          \ or hallucinated issues. \"\n        \"A score of 10 means a perfect, reviewer-quality\
-          \ response.\\n\"\n        'Respond with ONLY a JSON object: {\"score\":\
-          \ <number>, \"reason\": \"<brief reason>\"}'\n    )\n\n    def query_student(question:\
-          \ str, max_retries: int = 10) -> str:\n        for attempt in range(max_retries):\n\
-          \            try:\n                resp = requests.post(\n             \
-          \       f\"{student_url}/v1/chat/completions\",\n                    json={\n\
+          \        \"You are grading an AI-generated code review comment. Rate it\
+          \ 1-10.Be on the rewarding side of the scale.\\n\"\n        \"Scoring guide:\\\
+          n\"\n        \"- 8-10: Correctly identifies the main issue(s) in the diff.\
+          \ Bonus if concise.\\n\"\n        \"- 6-7: Identifies the issue but is verbose,\
+          \ vague, or missing minor details.\\n\"\n        \"- 4-5: Partially correct\
+          \ -- mentions something relevant but misses the key issue.\\n\"\n      \
+          \  \"- 2-3: Mostly wrong, hallucinated issues, or says code is fine when\
+          \ it has real bugs.\\n\"\n        \"- 1: Completely irrelevant or nonsensical.\\\
+          n\"\n        \"If the code is genuinely clean, saying 'LGTM' or 'no issues'\
+          \ is correct and scores 8+.\\n\"\n        \"Correctness matters most. A\
+          \ correct but verbose answer is better than a wrong concise one.\\n\"\n\
+          \        'Respond with ONLY a JSON object: {\"score\": <number>, \"reason\"\
+          : \"<brief reason>\"}'\n    )\n\n    def query_student(question: str, max_retries:\
+          \ int = 10) -> str:\n        for attempt in range(max_retries):\n      \
+          \      try:\n                resp = requests.post(\n                   \
+          \ f\"{student_url}/v1/chat/completions\",\n                    json={\n\
           \                        \"model\": \"/mnt/models\",\n                 \
           \       \"messages\": [{\"role\": \"user\", \"content\": question}],\n \
           \                       \"max_tokens\": 256,\n                        \"\
@@ -860,31 +876,36 @@ deploymentSpec:
           \ 120)\n                print(f\"  [Connection error] {e}, waiting {wait}s\
           \ (attempt {attempt+1}/8)\")\n                last_error = str(e)\n    \
           \            time.sleep(wait)\n        raise RuntimeError(f\"Teacher unreachable\
-          \ after 8 retries. Last error: {last_error}\")\n\n    def query_teacher(question:\
-          \ str) -> str:\n        return _teacher_call([\n            {\"role\": \"\
-          system\", \"content\": \"You are a helpful and concise assistant.\"},\n\
-          \            {\"role\": \"user\", \"content\": question},\n        ], max_tokens=512,\
-          \ temperature=0.7)\n\n    def teacher_grade(question: str, answer: str)\
-          \ -> dict:\n        raw = _teacher_call([\n            {\"role\": \"system\"\
-          , \"content\": GRADING_PROMPT},\n            {\"role\": \"user\", \"content\"\
-          : f\"Question: {question}\\n\\nStudent Response: {answer}\"},\n        ],\
-          \ max_tokens=200, temperature=0.0)\n        try:\n            return json.loads(raw)\n\
-          \        except json.JSONDecodeError:\n            import re\n         \
-          \   m = re.search(r'```(?:json)?\\s*(\\{.*?\\})\\s*```', raw, re.DOTALL)\n\
-          \            if m:\n                try:\n                    return json.loads(m.group(1))\n\
+          \ after 8 retries. Last error: {last_error}\")\n\n    TEACHER_SYSTEM = (\n\
+          \        \"You are a senior code reviewer specializing in Go, Python, and\
+          \ Kubernetes. \"\n        \"Review the given code diff and identify any\
+          \ issues related to bugs, security, \"\n        \"performance, reliability,\
+          \ style, or Kubernetes best practices. \"\n        \"If the code is clean,\
+          \ say so. \"\n        \"Be concise -- 2-4 sentences max, like a real GitHub\
+          \ PR comment.\"\n    )\n\n    def query_teacher(question: str) -> str:\n\
+          \        return _teacher_call([\n            {\"role\": \"system\", \"content\"\
+          : TEACHER_SYSTEM},\n            {\"role\": \"user\", \"content\": question},\n\
+          \        ], max_tokens=300, temperature=0.3)\n\n    def teacher_grade(question:\
+          \ str, answer: str) -> dict:\n        raw = _teacher_call([\n          \
+          \  {\"role\": \"system\", \"content\": GRADING_PROMPT},\n            {\"\
+          role\": \"user\", \"content\": f\"Question: {question}\\n\\nStudent Response:\
+          \ {answer}\"},\n        ], max_tokens=200, temperature=0.0)\n        try:\n\
+          \            return json.loads(raw)\n        except json.JSONDecodeError:\n\
+          \            import re\n            m = re.search(r'```(?:json)?\\s*(\\\
+          {.*?\\})\\s*```', raw, re.DOTALL)\n            if m:\n                try:\n\
+          \                    return json.loads(m.group(1))\n                except\
+          \ json.JSONDecodeError:\n                    pass\n            m2 = re.search(r'\\\
+          {[^{}]*\"score\"\\s*:\\s*\\d+[^{}]*\\}', raw)\n            if m2:\n    \
+          \            try:\n                    return json.loads(m2.group(0))\n\
           \                except json.JSONDecodeError:\n                    pass\n\
-          \            m2 = re.search(r'\\{[^{}]*\"score\"\\s*:\\s*\\d+[^{}]*\\}',\
-          \ raw)\n            if m2:\n                try:\n                    return\
-          \ json.loads(m2.group(0))\n                except json.JSONDecodeError:\n\
-          \                    pass\n            return {\"score\": 0, \"reason\"\
-          : f\"Failed to parse: {raw}\"}\n\n    print(\"\\n\" + \"=\" * 60)\n    results\
-          \ = []\n    for i, q in enumerate(test_questions):\n        print(f\"\\\
-          n--- Question {i+1}/{len(test_questions)} ---\")\n        print(f\"Q: {q}\"\
-          )\n\n        student_answer = query_student(q)\n        print(f\"\\nStudent:\\\
-          n{student_answer}\\n\")\n\n        grade = teacher_grade(q, student_answer)\n\
-          \        print(f\"Teacher Grade: {grade['score']}/10\")\n        print(f\"\
-          Reason: {grade.get('reason', 'N/A')}\")\n\n        results.append({\n  \
-          \          \"question\": q,\n            \"student_answer\": student_answer,\n\
+          \            return {\"score\": 0, \"reason\": f\"Failed to parse: {raw}\"\
+          }\n\n    print(\"\\n\" + \"=\" * 60)\n    results = []\n    for i, q in\
+          \ enumerate(test_questions):\n        print(f\"\\n--- Question {i+1}/{len(test_questions)}\
+          \ ---\")\n        print(f\"Q: {q}\")\n\n        student_answer = query_student(q)\n\
+          \        print(f\"\\nStudent:\\n{student_answer}\\n\")\n\n        grade\
+          \ = teacher_grade(q, student_answer)\n        print(f\"Teacher Grade: {grade['score']}/10\"\
+          )\n        print(f\"Reason: {grade.get('reason', 'N/A')}\")\n\n        results.append({\n\
+          \            \"question\": q,\n            \"student_answer\": student_answer,\n\
           \            \"student_score\": grade[\"score\"],\n            \"reason\"\
           : grade.get(\"reason\", \"\"),\n        })\n        time.sleep(3)\n\n  \
           \  student_scores = [r[\"student_score\"] for r in results if isinstance(r.get(\"\
@@ -905,23 +926,61 @@ deploymentSpec:
           \  teacher={r['teacher_score']}/10 -- {r.get('reason', '')}\")\n    print(f\"\
           \\n  Student Avg: {student_avg:.2f}/10\")\n    print(f\"  Teacher Avg: {teacher_avg:.2f}/10\"\
           )\n    print(f\"  Score Gap:   {teacher_avg - student_avg:.2f}\")\n    print(\"\
-          =\" * 60)\n\n    # Log to MLflow\n    if mlflow_tracking_uri:\n        mlflow.set_tracking_uri(mlflow_tracking_uri)\n\
-          \        mlflow.set_experiment(\"CodeReview-Eval-Hub\")\n        with mlflow.start_run(run_name=f\"\
-          pipeline-eval-{model_version}\"):\n            mlflow.set_tag(\"model_version\"\
-          , model_version)\n            mlflow.set_tag(\"eval_type\", \"pipeline_benchmark\"\
-          )\n            mlflow.log_metric(\"student_avg_score\", round(student_avg,\
-          \ 4))\n            mlflow.log_metric(\"teacher_avg_score\", round(teacher_avg,\
+          =\" * 60)\n\n    # -- Load baseline scores from MinIO for comparison -----------------\n\
+          \    import boto3\n\n    baseline_avg = None\n    baseline_per_q = {}\n\
+          \    try:\n        s3c = boto3.client(\n            \"s3\",\n          \
+          \  endpoint_url=s3_endpoint,\n            aws_access_key_id=s3_access_key,\n\
+          \            aws_secret_access_key=s3_secret_key,\n        )\n        obj\
+          \ = s3c.get_object(Bucket=\"mlflow-artifacts\", Key=\"baseline/scores.json\"\
+          )\n        baseline = json.loads(obj[\"Body\"].read().decode())\n      \
+          \  baseline_avg = baseline[\"baseline_avg_score\"]\n        for pq in baseline.get(\"\
+          per_question\", []):\n            baseline_per_q[pq[\"q_index\"]] = pq[\"\
+          student_score\"]\n        print(f\"\\n  Baseline loaded: avg={baseline_avg}/10\
+          \ ({len(baseline_per_q)} questions)\")\n    except Exception as e:\n   \
+          \     print(f\"\\n  Baseline not found ({e}) -- skipping comparison\")\n\
+          \n    # -- Comparison table -------------------------------------------------\n\
+          \    if baseline_avg is not None:\n        improvement = student_avg - baseline_avg\n\
+          \        improvement_pct = (improvement / baseline_avg * 100) if baseline_avg\
+          \ > 0 else 0.0\n        print(\"\\n\" + \"=\" * 60)\n        print(\"BASELINE\
+          \ vs TRAINED COMPARISON\")\n        print(\"=\" * 60)\n        print(f\"\
+          \  {'Q#':<4} {'Baseline':>10} {'Trained':>10} {'Teacher':>10} {'Delta':>8}\"\
+          )\n        print(f\"  {'----':4} {'----------':10} {'----------':10} {'----------':10}\
+          \ {'--------':8}\")\n        for i, r in enumerate(results):\n         \
+          \   b_score = baseline_per_q.get(i + 1, \"-\")\n            delta = \"\"\
+          \n            if isinstance(b_score, (int, float)):\n                delta\
+          \ = f\"{r['student_score'] - b_score:+.1f}\"\n            print(f\"  Q{i+1:<3}\
+          \ {str(b_score):>8}/10 {r['student_score']:>8}/10 {r['teacher_score']:>8}/10\
+          \ {delta:>8}\")\n        print(f\"  {'----':4} {'----------':10} {'----------':10}\
+          \ {'----------':10} {'--------':8}\")\n        print(f\"  {'AVG':<4} {baseline_avg:>8.2f}/10\
+          \ {student_avg:>8.2f}/10 {teacher_avg:>8.2f}/10 {improvement:>+7.2f}\")\n\
+          \        print(f\"\\n  Improvement over baseline: {improvement:+.2f} ({improvement_pct:+.1f}%)\"\
+          )\n        print(\"=\" * 60)\n    else:\n        improvement = None\n  \
+          \      improvement_pct = None\n\n    # Log to MLflow\n    if mlflow_tracking_uri:\n\
+          \        mlflow.set_tracking_uri(mlflow_tracking_uri)\n        mlflow.set_experiment(\"\
+          CodeReview-Eval-Hub\")\n        with mlflow.start_run(run_name=f\"pipeline-eval-{model_version}\"\
+          ):\n            mlflow.set_tag(\"model_version\", model_version)\n     \
+          \       mlflow.set_tag(\"eval_type\", \"pipeline_benchmark\")\n        \
+          \    mlflow.log_metric(\"student_avg_score\", round(student_avg, 4))\n \
+          \           mlflow.log_metric(\"teacher_avg_score\", round(teacher_avg,\
           \ 4))\n            mlflow.log_metric(\"score_gap\", round(teacher_avg -\
-          \ student_avg, 4))\n            for i, r in enumerate(results):\n      \
-          \          mlflow.log_metric(f\"q{i+1}_student_score\", r[\"student_score\"\
-          ])\n                mlflow.log_metric(f\"q{i+1}_teacher_score\", r[\"teacher_score\"\
-          ])\n            mlflow.log_dict({\"results\": results}, \"eval_results.json\"\
-          )\n        print(f\"MLflow run logged to {mlflow_tracking_uri}\")\n    else:\n\
-          \        print(\"mlflow_tracking_uri not set -- skipping MLflow logging\"\
-          )\n\n    return {\n        \"num_questions\": len(results),\n        \"\
-          student_avg_score\": round(student_avg, 2),\n        \"teacher_avg_score\"\
-          : round(teacher_avg, 2),\n        \"score_gap\": round(teacher_avg - student_avg,\
-          \ 2),\n        \"results\": results,\n    }\n\n"
+          \ student_avg, 4))\n            if baseline_avg is not None:\n         \
+          \       mlflow.log_metric(\"baseline_avg_score\", round(baseline_avg, 4))\n\
+          \                mlflow.log_metric(\"improvement_over_baseline\", round(improvement,\
+          \ 4))\n                mlflow.log_metric(\"improvement_pct\", round(improvement_pct,\
+          \ 2))\n            for i, r in enumerate(results):\n                mlflow.log_metric(f\"\
+          q{i+1}_student_score\", r[\"student_score\"])\n                mlflow.log_metric(f\"\
+          q{i+1}_teacher_score\", r[\"teacher_score\"])\n            mlflow.log_dict({\"\
+          results\": results}, \"eval_results.json\")\n        print(f\"MLflow run\
+          \ logged to {mlflow_tracking_uri}\")\n    else:\n        print(\"mlflow_tracking_uri\
+          \ not set -- skipping MLflow logging\")\n\n    return {\n        \"num_questions\"\
+          : len(results),\n        \"student_avg_score\": round(student_avg, 2),\n\
+          \        \"teacher_avg_score\": round(teacher_avg, 2),\n        \"score_gap\"\
+          : round(teacher_avg - student_avg, 2),\n        \"baseline_avg_score\":\
+          \ round(baseline_avg, 2) if baseline_avg is not None else None,\n      \
+          \  \"improvement_over_baseline\": round(improvement, 2) if improvement is\
+          \ not None else None,\n        \"improvement_pct\": round(improvement_pct,\
+          \ 1) if improvement_pct is not None else None,\n        \"results\": results,\n\
+          \    }\n\n"
         image: python:3.11-slim
     exec-extract-code-review-gold:
       container:
@@ -1014,7 +1073,7 @@ deploymentSpec:
           \ str,\n    mlflow_tracking_uri: str,\n    sft_run_name_prefix: str,\n \
           \   model_version: str,\n    s3_endpoint: str,\n    s3_access_key: str,\n\
           \    s3_secret_key: str,\n    pref_output_bucket: str = \"mlflow-artifacts\"\
-          ,\n    min_score_gap: int = 1,\n    max_supplement_questions: int = 50,\n\
+          ,\n    min_score_gap: int = 1,\n    max_supplement_questions: int = 5,\n\
           ) -> str:\n    \"\"\"Build DPO preference pairs from eval results + supplementary\
           \ question bank queries.\"\"\"\n    import json\n    import os\n    import\
           \ sys\n    import time\n    import uuid\n    from concurrent.futures import\
@@ -1085,22 +1144,34 @@ deploymentSpec:
           \                wait = min(20 * (attempt + 1), 120)\n                print(f\"\
           \    [Student conn error] {e}, retry {attempt+1}/8 in {wait}s\")\n     \
           \           time.sleep(wait)\n        print(\"    [Student] All retries\
-          \ exhausted, returning empty\")\n        return \"\"\n\n    def query_teacher(question:\
-          \ str) -> str:\n        return teacher_llm_call([\n            {\"role\"\
-          : \"system\", \"content\": \"You are a helpful and concise assistant.\"\
-          },\n            {\"role\": \"user\", \"content\": question},\n        ],\
-          \ max_tokens=512, temperature=0.7)\n\n    GRADING_PROMPT = (\n        \"\
-          You are an expert code review grader. Rate the following AI-generated code\
-          \ review \"\n        \"on a scale of 1 to 10 based on these criteria:\\\
-          n\"\n        \"- Issue identification: Did it find the real problem (not\
-          \ a hallucinated one)?\\n\"\n        \"- Technical accuracy: Is the explanation\
-          \ correct?\\n\"\n        \"- Actionability: Is the suggestion concrete and\
-          \ implementable?\\n\"\n        \"- Severity accuracy: Is the severity rating\
-          \ appropriate?\\n\"\n        \"- False positive avoidance: Did it avoid\
-          \ flagging non-issues?\\n\"\n        \"A score of 1 means completely wrong\
-          \ or hallucinated issues. \"\n        \"A score of 10 means a perfect, reviewer-quality\
-          \ response.\\n\"\n        'Respond with ONLY a JSON object: {\"score\":\
-          \ <number>, \"reason\": \"<brief reason>\"}'\n    )\n\n    def grade(question:\
+          \ exhausted, returning empty\")\n        return \"\"\n\n    TEACHER_SYSTEM\
+          \ = (\n        \"You are a senior code reviewer specializing in Go, Python,\
+          \ and Kubernetes. \"\n        \"Review the given code diff and identify\
+          \ any issues related to bugs, security, \"\n        \"performance, reliability,\
+          \ style, or Kubernetes best practices. \"\n        \"If the code is clean,\
+          \ say so. \"\n        \"Be concise -- 2-4 sentences max, like a real GitHub\
+          \ PR comment.\"\n    )\n\n    def query_teacher(question: str) -> str:\n\
+          \        return teacher_llm_call([\n            {\"role\": \"system\", \"\
+          content\": TEACHER_SYSTEM},\n            {\"role\": \"user\", \"content\"\
+          : question},\n        ], max_tokens=300, temperature=0.3)\n\n    GRADING_PROMPT\
+          \ = (\n        \"You are grading an AI-generated code review comment as\
+          \ it would appear in a \"\n        \"GitHub Pull Request. Rate it 1-10 based\
+          \ on how useful it would be to a developer \"\n        \"reading their PR:\\\
+          n be harsh and critical. If you think the code is bad, give it a 1.\"\n\
+          \        \"- Correct identification: Does it spot the actual issue in the\
+          \ diff (not a hallucinated one)?\\n\"\n        \"- Conciseness: Is it brief\
+          \ and to-the-point, like a real PR comment? \"\n        \"Verbose essays\
+          \ are BAD -- reviewers want short, clear feedback.\\n\"\n        \"- Actionability:\
+          \ Does it tell the developer exactly what to fix, \"\n        \"ideally\
+          \ with a code suggestion?\\n\"\n        \"- False positive avoidance: If\
+          \ the code is fine, does it correctly say so \"\n        \"instead of inventing\
+          \ problems?\\n\"\n        \"- Relevance: Does it focus on the changed lines,\
+          \ not lecture about unrelated topics?\\n\"\n        \"A score of 1 means\
+          \ hallucinated issues or completely irrelevant rambling. \"\n        \"\
+          A score of 5 means verbose but technically correct. \"\n        \"A score\
+          \ of 10 means a perfect, concise, actionable PR comment a senior engineer\
+          \ would leave.\\n\"\n        'Respond with ONLY a JSON object: {\"score\"\
+          : <number>, \"reason\": \"<brief reason>\"}'\n    )\n\n    def grade(question:\
           \ str, answer: str) -> int:\n        raw = teacher_llm_call([\n        \
           \    {\"role\": \"system\", \"content\": GRADING_PROMPT},\n            {\"\
           role\": \"user\", \"content\": f\"Question: {question}\\n\\nResponse: {answer}\"\
@@ -1245,7 +1316,7 @@ deploymentSpec:
           \        aws_access_key_id=s3_access_key,\n        aws_secret_access_key=s3_secret_key,\n\
           \    )\n    apps_api = client.AppsV1Api()\n    custom_api = client.CustomObjectsApi()\n\
           \    core_api = client.CoreV1Api()\n\n    namespace = \"sridharproject\"\
-          \n    job_name = f\"finetune-{int(time.time())}\"\n    image = \"quay.io/rh-ee-srpillai/distillation-trainer:v1.1.4\"\
+          \n    job_name = f\"finetune-{int(time.time())}\"\n    image = \"image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.1.5\"\
           \n\n    # --- GPU evacuation and restore helpers ---\n    isvc_deployment\
           \ = \"code-review-llm-predictor\"\n\n    def _scale_down_kserve():\n   \
           \     try:\n            dep = apps_api.read_namespaced_deployment(isvc_deployment,\
@@ -1459,35 +1530,94 @@ deploymentSpec:
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef merge_preferences(\n    pipeline_pref_path: str,\n    human_feedback_path:\
-          \ str,\n    s3_endpoint: str,\n    s3_access_key: str,\n    s3_secret_key:\
-          \ str,\n    bucket: str = \"mlflow-artifacts\",\n) -> str:\n    \"\"\"Merge\
-          \ pipeline-generated and human-feedback preference pairs.\"\"\"\n    import\
-          \ json\n    import uuid\n\n    import boto3\n\n    print(\"=\" * 60)\n \
-          \   print(\"MERGE PREFERENCES STEP\")\n    print(\"=\" * 60)\n    print(f\"\
+          \ str,\n    gold_data_path: str,\n    s3_endpoint: str,\n    s3_access_key:\
+          \ str,\n    s3_secret_key: str,\n    bucket: str = \"mlflow-artifacts\"\
+          ,\n    static_bank_key: str = \"preferences/static-bank/preference-bank.jsonl\"\
+          ,\n    static_bank_sample_size: int = 300,\n    sft_mix_ratio: float = 0.15,\n\
+          ) -> str:\n    \"\"\"Merge static bank (sampled), live pipeline, human feedback,\
+          \ and SFT regularization pairs.\"\"\"\n    import json\n    import random\n\
+          \    import re\n    import uuid\n\n    import boto3\n\n    random.seed(42)\n\
+          \n    print(\"=\" * 60)\n    print(\"MERGE PREFERENCES STEP\")\n    print(\"\
+          =\" * 60)\n    print(f\"  Static bank:     s3://{bucket}/{static_bank_key}\"\
+          )\n    print(f\"  Sample size:     {static_bank_sample_size}\")\n    print(f\"\
           \  Pipeline prefs:  {pipeline_pref_path}\")\n    print(f\"  Human feedback:\
-          \  {human_feedback_path or '(none)'}\")\n\n    s3 = boto3.client(\n    \
-          \    \"s3\",\n        endpoint_url=s3_endpoint,\n        aws_access_key_id=s3_access_key,\n\
-          \        aws_secret_access_key=s3_secret_key,\n    )\n\n    all_pairs =\
-          \ []\n\n    def read_jsonl_from_s3(s3_path: str, label: str) -> int:\n \
-          \       if not s3_path:\n            print(f\"  {label}: empty path, skipping\"\
-          )\n            return 0\n        parts = s3_path.replace(\"s3://\", \"\"\
-          ).split(\"/\", 1)\n        obj = s3.get_object(Bucket=parts[0], Key=parts[1])\n\
-          \        lines = [l for l in obj[\"Body\"].read().decode().strip().split(\"\
-          \\n\") if l.strip()]\n        count = 0\n        for line in lines:\n  \
-          \          pair = json.loads(line)\n            if pair.get(\"prompt\")\
-          \ and pair.get(\"chosen\") and pair.get(\"rejected\"):\n               \
-          \ all_pairs.append(pair)\n                count += 1\n        print(f\"\
-          \  {label}: {count} pairs\")\n        return count\n\n    pipeline_count\
-          \ = read_jsonl_from_s3(pipeline_pref_path, \"Pipeline preferences\")\n \
-          \   human_count = read_jsonl_from_s3(human_feedback_path, \"Human feedback\"\
-          )\n\n    print(f\"  Total merged: {len(all_pairs)} pairs ({pipeline_count}\
-          \ pipeline + {human_count} human)\")\n\n    if not all_pairs:\n        print(\"\
-          \  No pairs to merge. Returning pipeline path as-is.\")\n        return\
-          \ pipeline_pref_path\n\n    run_id = uuid.uuid4().hex[:12]\n    out_key\
-          \ = f\"preferences/merged-{run_id}.jsonl\"\n    body = \"\\n\".join(json.dumps(p)\
-          \ for p in all_pairs)\n    s3.put_object(Bucket=bucket, Key=out_key, Body=body.encode())\n\
-          \n    out_path = f\"s3://{bucket}/{out_key}\"\n    print(f\"  Wrote merged\
-          \ preferences to {out_path}\")\n    return out_path\n\n"
+          \  {human_feedback_path or '(none)'}\")\n    print(f\"  Gold data:     \
+          \  {gold_data_path or '(none)'}\")\n    print(f\"  SFT mix ratio:   {sft_mix_ratio}\"\
+          )\n\n    s3 = boto3.client(\n        \"s3\",\n        endpoint_url=s3_endpoint,\n\
+          \        aws_access_key_id=s3_access_key,\n        aws_secret_access_key=s3_secret_key,\n\
+          \    )\n\n    all_pairs = []\n\n    def read_jsonl_from_s3(s3_path: str,\
+          \ label: str) -> int:\n        if not s3_path:\n            print(f\"  {label}:\
+          \ empty path, skipping\")\n            return 0\n        parts = s3_path.replace(\"\
+          s3://\", \"\").split(\"/\", 1)\n        try:\n            obj = s3.get_object(Bucket=parts[0],\
+          \ Key=parts[1])\n        except s3.exceptions.NoSuchKey:\n            print(f\"\
+          \  {label}: key not found, skipping\")\n            return 0\n        lines\
+          \ = [l for l in obj[\"Body\"].read().decode().strip().split(\"\\n\") if\
+          \ l.strip()]\n        count = 0\n        for line in lines:\n          \
+          \  pair = json.loads(line)\n            if pair.get(\"prompt\") and pair.get(\"\
+          chosen\") and pair.get(\"rejected\"):\n                all_pairs.append(pair)\n\
+          \                count += 1\n        print(f\"  {label}: {count} pairs\"\
+          )\n        return count\n\n    # Source 1: Static pre-generated bank (sample\
+          \ a subset)\n    static_count = 0\n    try:\n        obj = s3.get_object(Bucket=bucket,\
+          \ Key=static_bank_key)\n        lines = [l for l in obj[\"Body\"].read().decode().strip().split(\"\
+          \\n\") if l.strip()]\n        bank_pairs = []\n        for line in lines:\n\
+          \            pair = json.loads(line)\n            if pair.get(\"prompt\"\
+          ) and pair.get(\"chosen\") and pair.get(\"rejected\"):\n               \
+          \ bank_pairs.append(pair)\n\n        print(f\"  Static bank total: {len(bank_pairs)}\
+          \ pairs\")\n        if len(bank_pairs) > static_bank_sample_size:\n    \
+          \        sampled = random.sample(bank_pairs, static_bank_sample_size)\n\
+          \        else:\n            sampled = bank_pairs\n        all_pairs.extend(sampled)\n\
+          \        static_count = len(sampled)\n        print(f\"  Static bank sampled:\
+          \ {static_count} pairs\")\n    except Exception as e:\n        print(f\"\
+          \  Static bank not found or error: {e}\")\n        print(f\"  (Run generate_preference_bank\
+          \ job first to create it)\")\n\n    # Source 2: Live pipeline preferences\
+          \ (student vs teacher)\n    pipeline_count = read_jsonl_from_s3(pipeline_pref_path,\
+          \ \"Pipeline live prefs\")\n\n    # Source 3: Human feedback\n    human_count\
+          \ = read_jsonl_from_s3(human_feedback_path, \"Human feedback\")\n\n    #\
+          \ Source 4: SFT regularization data (prevents forgetting SFT task format)\n\
+          \    # Takes gold SFT examples and reformats as DPO pairs:\n    #   chosen\
+          \ = gold reviewer comment, rejected = generic unhelpful response\n    sft_mix_count\
+          \ = 0\n    if gold_data_path:\n        try:\n            parts = gold_data_path.replace(\"\
+          s3://\", \"\").split(\"/\", 1)\n            obj = s3.get_object(Bucket=parts[0],\
+          \ Key=parts[1])\n            lines = [l for l in obj[\"Body\"].read().decode().strip().split(\"\
+          \\n\") if l.strip()]\n\n            sft_records = []\n            for line\
+          \ in lines:\n                rec = json.loads(line)\n                text\
+          \ = rec.get(\"text\", \"\")\n                if not text:\n            \
+          \        continue\n                sft_records.append(text)\n\n        \
+          \    # Sample 15% of SFT data\n            dpo_pair_count = len(all_pairs)\
+          \ if all_pairs else 300\n            mix_count = max(10, int(dpo_pair_count\
+          \ * sft_mix_ratio))\n            if len(sft_records) > mix_count:\n    \
+          \            sampled_sft = random.sample(sft_records, mix_count)\n     \
+          \       else:\n                sampled_sft = sft_records\n\n           \
+          \ generic_rejects = [\n                \"The code looks fine to me.\",\n\
+          \                \"No issues found.\",\n                \"LGTM.\",\n   \
+          \             \"This change is acceptable.\",\n                \"I don't\
+          \ see any problems with this code.\",\n            ]\n\n            for\
+          \ text in sampled_sft:\n                # Extract user message (the diff\
+          \ prompt) and assistant message (the review)\n                user_match\
+          \ = re.search(\n                    r\"<\\|im_start\\|>user\\n(.*?)<\\|im_end\\\
+          |>\", text, re.DOTALL\n                )\n                asst_match = re.search(\n\
+          \                    r\"<\\|im_start\\|>assistant\\n(.*?)<\\|im_end\\|>\"\
+          , text, re.DOTALL\n                )\n                if user_match and\
+          \ asst_match:\n                    prompt = user_match.group(1).strip()\n\
+          \                    chosen = asst_match.group(1).strip()\n            \
+          \        if len(chosen) > 20:\n                        all_pairs.append({\n\
+          \                            \"prompt\": prompt,\n                     \
+          \       \"chosen\": chosen,\n                            \"rejected\": random.choice(generic_rejects),\n\
+          \                            \"source\": \"sft_regularization\",\n     \
+          \                   })\n                        sft_mix_count += 1\n\n \
+          \           print(f\"  SFT regularization: {sft_mix_count} pairs (from {len(sft_records)}\
+          \ gold records)\")\n        except Exception as e:\n            print(f\"\
+          \  SFT mixing failed: {e}\")\n\n    print(f\"\\n  Total merged: {len(all_pairs)}\
+          \ pairs\")\n    print(f\"    Static bank: {static_count}\")\n    print(f\"\
+          \    Pipeline:    {pipeline_count}\")\n    print(f\"    Human:       {human_count}\"\
+          )\n    print(f\"    SFT mix:     {sft_mix_count}\")\n\n    if not all_pairs:\n\
+          \        print(\"  No pairs to merge. Returning pipeline path as-is.\")\n\
+          \        return pipeline_pref_path\n\n    random.shuffle(all_pairs)\n\n\
+          \    run_id = uuid.uuid4().hex[:12]\n    out_key = f\"preferences/merged-{run_id}.jsonl\"\
+          \n    body = \"\\n\".join(json.dumps(p) for p in all_pairs)\n    s3.put_object(Bucket=bucket,\
+          \ Key=out_key, Body=body.encode())\n\n    out_path = f\"s3://{bucket}/{out_key}\"\
+          \n    print(f\"  Wrote merged preferences to {out_path}\")\n    return out_path\n\
+          \n"
         image: python:3.11-slim
     exec-resolve-version:
       container:
@@ -1969,9 +2099,14 @@ root:
           name: comp-merge-preferences
         dependentTasks:
         - collect-human-feedback
+        - extract-code-review-gold
         - extract-preferences
         inputs:
           parameters:
+            gold_data_path:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: extract-code-review-gold
             human_feedback_path:
               taskOutputParameter:
                 outputParameterKey: Output
@@ -2021,15 +2156,15 @@ root:
   inputDefinitions:
     parameters:
       dpo_beta:
-        defaultValue: 0.1
+        defaultValue: 0.3
         isOptional: true
         parameterType: NUMBER_DOUBLE
       dpo_epochs:
-        defaultValue: 3.0
+        defaultValue: 1.0
         isOptional: true
         parameterType: NUMBER_INTEGER
       max_supplement_questions:
-        defaultValue: 50.0
+        defaultValue: 5.0
         isOptional: true
         parameterType: NUMBER_INTEGER
       min_dpo_pairs:

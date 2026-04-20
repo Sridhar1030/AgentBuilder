@@ -46,7 +46,7 @@ def finetune(
 
     namespace = "sridharproject"
     job_name = f"finetune-{int(time.time())}"
-    image = "quay.io/rh-ee-srpillai/distillation-trainer:v1.1.4"
+    image = "image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.1.5"
 
     # --- GPU evacuation and restore helpers ---
     isvc_deployment = "code-review-llm-predictor"
