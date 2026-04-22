@@ -29,6 +29,15 @@ def extract_gold_data(
     import random
     import boto3
 
+    print("=" * 60)
+    print("EXTRACT GOLD DATA STEP")
+    print("=" * 60)
+    print(f"  Teacher bucket: {teacher_bucket}/{teacher_prefix}")
+    print(f"  Synthetic:      {synthetic_bucket}/{synthetic_prefix}")
+    print(f"  Output:         {output_s3_path}")
+    print(f"  Min threshold:  {min_threshold}")
+    print("=" * 60)
+
     s3 = boto3.client(
         "s3",
         endpoint_url=s3_endpoint,

@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feedback-api
+  namespace: sridharproject
+  labels:
+    app: feedback-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: feedback-api
+  template:
+    metadata:
+      labels:
+        app: feedback-api
+    spec:
+      containers:
+        - name: feedback-api
+          image: image-registry.openshift-image-registry.svc:5000/sridharproject/feedback-api:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: OLLAMA_URL
+              value: "http://ollama.sridharproject.svc.cluster.local:11434"
+            - name: TEACHER_MODEL
+              value: "qwen2.5-coder:32b-instruct-q4_K_M"
+            - name: S3_ENDPOINT
+              value: "http://minio.sridharproject.svc.cluster.local:9000"
+            - name: S3_ACCESS_KEY
+              value: "minioadmin"
+            - name: S3_SECRET_KEY
+              value: "minioadmin123"
+            - name: S3_BUCKET
+              value: "mlflow-artifacts"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: feedback-api
+  namespace: sridharproject
+  labels:
+    app: feedback-api
+spec:
+  selector:
+    app: feedback-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: feedback-api
+  namespace: sridharproject
+spec:
+  to:
+    kind: Service
+    name: feedback-api
+  port:
+    targetPort: 8000
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

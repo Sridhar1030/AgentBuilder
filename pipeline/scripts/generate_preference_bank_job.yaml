@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: generate-preference-bank
+  namespace: sridharproject
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: generate-preference-bank
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: gen
+          image: quay.io/rh-ee-srpillai/distillation-trainer:v1.1.4
+          command:
+            - sh
+            - -c
+            - "pip install datasets && python /opt/scripts/generate_preference_bank.py"
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              value: "minioadmin"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "minioadmin123"
+            - name: TARGET_PAIRS
+              value: "300"
+            - name: NUM_WORKERS
+              value: "4"
+            - name: HF_HOME
+              value: "/tmp/hf_cache"
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          volumeMounts:
+            - name: script
+              mountPath: /opt/scripts/generate_preference_bank.py
+              subPath: generate_preference_bank.py
+      volumes:
+        - name: script
+          configMap:
+            name: preference-bank-script

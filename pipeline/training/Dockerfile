@@ -9,8 +9,12 @@ RUN pip install --no-cache-dir \
     accelerate==1.6.0 \
     boto3 \
     sentencepiece \
-    protobuf
+    protobuf \
+    tiktoken \
+    mlflow-skinny
 
 COPY finetune_job.py /opt/scripts/finetune_job.py
+COPY entrypoint.sh /opt/scripts/entrypoint.sh
+RUN chmod +x /opt/scripts/entrypoint.sh
 
-ENTRYPOINT ["python", "/opt/scripts/finetune_job.py"]
+ENTRYPOINT ["/opt/scripts/entrypoint.sh"]

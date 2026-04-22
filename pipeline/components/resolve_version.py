@@ -14,6 +14,7 @@ VersionOutputs = NamedTuple(
         ("version", str),
         ("gold_data_path", str),
         ("model_output_path", str),
+        ("prev_model_path", str),
     ],
 )
 
@@ -29,12 +30,22 @@ def resolve_version(
     model_bucket: str,
     model_prefix: str,
     gold_bucket: str,
+    hf_base_model_id: str = "Qwen/Qwen2.5-Coder-1.5B-Instruct",
     explicit_version: str = "",
-) -> NamedTuple("VersionOutputs", [("version", str), ("gold_data_path", str), ("model_output_path", str)]):
+) -> NamedTuple("VersionOutputs", [("version", str), ("gold_data_path", str), ("model_output_path", str), ("prev_model_path", str)]):
     """Find the latest student-1b-vN/ in MinIO and return vN+1 with paths."""
     import re
     from collections import namedtuple
     import boto3
+
+    print("=" * 60)
+    print("RESOLVE VERSION STEP")
+    print("=" * 60)
+    print(f"  Model bucket: {model_bucket}")
+    print(f"  Model prefix: {model_prefix}")
+    print(f"  Gold bucket:  {gold_bucket}")
+    print(f"  Explicit ver: {explicit_version or '(auto)'}")
+    print("=" * 60)
 
     s3 = boto3.client(
         "s3",
@@ -43,27 +54,34 @@ def resolve_version(
         aws_secret_access_key=s3_secret_key,
     )
 
+    paginator = s3.get_paginator("list_objects_v2")
+    version_numbers = []
+
+    for page in paginator.paginate(Bucket=model_bucket, Prefix=model_prefix, Delimiter="/"):
+        for cp in page.get("CommonPrefixes", []):
+            folder = cp["Prefix"]
+            match = re.search(r"-v(\d+)/?$", folder)
+            if match:
+                version_numbers.append(int(match.group(1)))
+
     if explicit_version:
         version = explicit_version
         print(f"Using explicit version: {version}")
+    elif version_numbers:
+        latest = max(version_numbers)
+        version = f"v{latest + 1}"
+        print(f"Found versions: {sorted(version_numbers)}. Latest: v{latest}. Next: {version}")
     else:
-        paginator = s3.get_paginator("list_objects_v2")
-        version_numbers = []
+        version = "v1"
+        print(f"No existing versions found under {model_bucket}/{model_prefix}. Starting at {version}")
 
-        for page in paginator.paginate(Bucket=model_bucket, Prefix=model_prefix, Delimiter="/"):
-            for cp in page.get("CommonPrefixes", []):
-                folder = cp["Prefix"]
-                match = re.search(r"-v(\d+)/?$", folder)
-                if match:
-                    version_numbers.append(int(match.group(1)))
-
-        if version_numbers:
-            latest = max(version_numbers)
-            version = f"v{latest + 1}"
-            print(f"Found versions: {sorted(version_numbers)}. Latest: v{latest}. Next: {version}")
-        else:
-            version = "v1"
-            print(f"No existing versions found under {model_bucket}/{model_prefix}. Starting at {version}")
+    if version_numbers:
+        prev_version = max(version_numbers)
+        prev_model_path = f"s3://{model_bucket}/{model_prefix}v{prev_version}/"
+        print(f"Previous model: {prev_model_path} (iterative SFT will start from here)")
+    else:
+        prev_model_path = hf_base_model_id
+        print(f"No previous model found -- SFT will start from HuggingFace base: {hf_base_model_id}")
 
     gold_data_path = f"s3://{gold_bucket}/gold/train-{version}.jsonl"
     model_output_path = f"s3://{model_bucket}/{model_prefix}{version}/"
@@ -71,6 +89,7 @@ def resolve_version(
     print(f"Version: {version}")
     print(f"Gold data path: {gold_data_path}")
     print(f"Model output path: {model_output_path}")
+    print(f"Prev model path: {prev_model_path or '(none)'}")
 
-    Outputs = namedtuple("VersionOutputs", ["version", "gold_data_path", "model_output_path"])
-    return Outputs(version=version, gold_data_path=gold_data_path, model_output_path=model_output_path)
+    Outputs = namedtuple("VersionOutputs", ["version", "gold_data_path", "model_output_path", "prev_model_path"])
+    return Outputs(version=version, gold_data_path=gold_data_path, model_output_path=model_output_path, prev_model_path=prev_model_path)

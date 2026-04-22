@@ -1,0 +1,2068 @@
+# PIPELINE DEFINITION
+# Name: code-review-slm
+# Description: Code Review SLM: SFT + DPO distillation on Go/Python/K8s code diffs using Qwen2.5-Coder-1.5B.
+# Inputs:
+#    dpo_beta: float [Default: 0.1]
+#    dpo_epochs: int [Default: 3.0]
+#    max_supplement_questions: int [Default: 50.0]
+#    min_dpo_pairs: int [Default: 3.0]
+#    model_version: str [Default: '']
+#    num_epochs: int [Default: 3.0]
+#    s3_access_key: str [Default: 'minioadmin']
+#    s3_secret_key: str [Default: 'minioadmin123']
+#    teacher_api_key: str [Default: '']
+#    teacher_api_url: str [Default: 'http://ollama.sridharproject.svc.cluster.local:11434']
+#    teacher_model: str [Default: 'qwen2.5-coder:32b-instruct-q4_K_M']
+components:
+  comp-collect-human-feedback:
+    executorLabel: exec-collect-human-feedback
+    inputDefinitions:
+      parameters:
+        bucket:
+          defaultValue: mlflow-artifacts
+          isOptional: true
+          parameterType: STRING
+        s3_access_key:
+          parameterType: STRING
+        s3_endpoint:
+          parameterType: STRING
+        s3_secret_key:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-deploy-model:
+    executorLabel: exec-deploy-model
+    inputDefinitions:
+      parameters:
+        isvc_name:
+          parameterType: STRING
+        model_s3_path:
+          parameterType: STRING
+        namespace:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-deploy-model-2:
+    executorLabel: exec-deploy-model-2
+    inputDefinitions:
+      parameters:
+        isvc_name:
+          parameterType: STRING
+        model_s3_path:
+          parameterType: STRING
+        namespace:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-dpo-finetune:
+    executorLabel: exec-dpo-finetune
+    inputDefinitions:
+      parameters:
+        batch_size:
+          defaultValue: 1.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        dpo_beta:
+          defaultValue: 0.1
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+        learning_rate:
+          defaultValue: 5.0e-05
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+        lora_alpha:
+          defaultValue: 32.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        lora_r:
+          defaultValue: 16.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        min_pairs:
+          defaultValue: 3.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        model_version:
+          parameterType: STRING
+        num_epochs:
+          defaultValue: 1.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        pref_data_s3_path:
+          parameterType: STRING
+        s3_access_key:
+          parameterType: STRING
+        s3_endpoint:
+          parameterType: STRING
+        s3_secret_key:
+          parameterType: STRING
+        sft_model_s3_path:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-evaluate:
+    executorLabel: exec-evaluate
+    inputDefinitions:
+      parameters:
+        mlflow_tracking_uri:
+          defaultValue: ''
+          isOptional: true
+          parameterType: STRING
+        model_version:
+          defaultValue: unknown
+          isOptional: true
+          parameterType: STRING
+        s3_access_key:
+          defaultValue: ''
+          isOptional: true
+          parameterType: STRING
+        s3_endpoint:
+          defaultValue: ''
+          isOptional: true
+          parameterType: STRING
+        s3_secret_key:
+          defaultValue: ''
+          isOptional: true
+          parameterType: STRING
+        student_url:
+          parameterType: STRING
+        teacher_api_key:
+          parameterType: STRING
+        teacher_api_url:
+          parameterType: STRING
+        teacher_model:
+          parameterType: STRING
+        test_questions:
+          parameterType: LIST
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRUCT
+  comp-extract-code-review-gold:
+    executorLabel: exec-extract-code-review-gold
+    inputDefinitions:
+      parameters:
+        output_s3_path:
+          parameterType: STRING
+        s3_access_key:
+          parameterType: STRING
+        s3_endpoint:
+          parameterType: STRING
+        s3_secret_key:
+          parameterType: STRING
+        synthetic_bucket:
+          parameterType: STRING
+        synthetic_prefix:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-extract-preferences:
+    executorLabel: exec-extract-preferences
+    inputDefinitions:
+      parameters:
+        max_supplement_questions:
+          defaultValue: 50.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        min_score_gap:
+          defaultValue: 1.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        mlflow_tracking_uri:
+          parameterType: STRING
+        model_version:
+          parameterType: STRING
+        pref_output_bucket:
+          defaultValue: mlflow-artifacts
+          isOptional: true
+          parameterType: STRING
+        question_bank_s3_path:
+          parameterType: STRING
+        s3_access_key:
+          parameterType: STRING
+        s3_endpoint:
+          parameterType: STRING
+        s3_secret_key:
+          parameterType: STRING
+        sft_run_name_prefix:
+          parameterType: STRING
+        student_url:
+          parameterType: STRING
+        teacher_api_key:
+          parameterType: STRING
+        teacher_api_url:
+          parameterType: STRING
+        teacher_model:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-finetune:
+    executorLabel: exec-finetune
+    inputDefinitions:
+      parameters:
+        base_model_id:
+          parameterType: STRING
+        batch_size:
+          defaultValue: 4.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        gold_data_path:
+          parameterType: STRING
+        learning_rate:
+          defaultValue: 0.0002
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+        lora_alpha:
+          defaultValue: 32.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        lora_r:
+          defaultValue: 16.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        model_output_s3_path:
+          parameterType: STRING
+        num_epochs:
+          defaultValue: 3.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        s3_access_key:
+          parameterType: STRING
+        s3_endpoint:
+          parameterType: STRING
+        s3_secret_key:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-merge-preferences:
+    executorLabel: exec-merge-preferences
+    inputDefinitions:
+      parameters:
+        bucket:
+          defaultValue: mlflow-artifacts
+          isOptional: true
+          parameterType: STRING
+        human_feedback_path:
+          parameterType: STRING
+        pipeline_pref_path:
+          parameterType: STRING
+        s3_access_key:
+          parameterType: STRING
+        s3_endpoint:
+          parameterType: STRING
+        s3_secret_key:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-resolve-version:
+    executorLabel: exec-resolve-version
+    inputDefinitions:
+      parameters:
+        explicit_version:
+          defaultValue: ''
+          isOptional: true
+          parameterType: STRING
+        gold_bucket:
+          parameterType: STRING
+        hf_base_model_id:
+          defaultValue: Qwen/Qwen2.5-Coder-1.5B-Instruct
+          isOptional: true
+          parameterType: STRING
+        model_bucket:
+          parameterType: STRING
+        model_prefix:
+          parameterType: STRING
+        s3_access_key:
+          parameterType: STRING
+        s3_endpoint:
+          parameterType: STRING
+        s3_secret_key:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        gold_data_path:
+          parameterType: STRING
+        model_output_path:
+          parameterType: STRING
+        prev_model_path:
+          parameterType: STRING
+        version:
+          parameterType: STRING
+deploymentSpec:
+  executors:
+    exec-collect-human-feedback:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - collect_human_feedback
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'boto3'  && \
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef collect_human_feedback(\n    s3_endpoint: str,\n    s3_access_key:\
+          \ str,\n    s3_secret_key: str,\n    bucket: str = \"mlflow-artifacts\"\
+          ,\n) -> str:\n    \"\"\"Read pending human-feedback DPO pairs and move them\
+          \ to used/.\"\"\"\n    import json\n    import uuid\n\n    import boto3\n\
+          \n    print(\"=\" * 60)\n    print(\"COLLECT HUMAN FEEDBACK STEP\")\n  \
+          \  print(\"=\" * 60)\n\n    s3 = boto3.client(\n        \"s3\",\n      \
+          \  endpoint_url=s3_endpoint,\n        aws_access_key_id=s3_access_key,\n\
+          \        aws_secret_access_key=s3_secret_key,\n    )\n\n    pending_prefix\
+          \ = \"preferences/human-feedback/pending/\"\n    used_prefix = \"preferences/human-feedback/used/\"\
+          \n\n    pairs = []\n    consumed_keys = []\n    paginator = s3.get_paginator(\"\
+          list_objects_v2\")\n\n    for page in paginator.paginate(Bucket=bucket,\
+          \ Prefix=pending_prefix):\n        for obj in page.get(\"Contents\", []):\n\
+          \            key = obj[\"Key\"]\n            if not key.endswith(\".jsonl\"\
+          ):\n                continue\n            try:\n                body = s3.get_object(Bucket=bucket,\
+          \ Key=key)[\"Body\"].read().decode()\n                for line in body.strip().splitlines():\n\
+          \                    line = line.strip()\n                    if not line:\n\
+          \                        continue\n                    pair = json.loads(line)\n\
+          \                    if pair.get(\"prompt\") and pair.get(\"chosen\") and\
+          \ pair.get(\"rejected\"):\n                        pairs.append(pair)\n\
+          \                consumed_keys.append(key)\n                print(f\"  Read\
+          \ {key}\")\n            except Exception as e:\n                print(f\"\
+          \  Warning: skipping {key}: {e}\")\n\n    print(f\"  Found {len(pairs)}\
+          \ human feedback pairs from {len(consumed_keys)} files\")\n\n    for key\
+          \ in consumed_keys:\n        filename = key.split(\"/\")[-1]\n        dest_key\
+          \ = f\"{used_prefix}{filename}\"\n        s3.copy_object(\n            Bucket=bucket,\n\
+          \            CopySource={\"Bucket\": bucket, \"Key\": key},\n          \
+          \  Key=dest_key,\n        )\n        s3.delete_object(Bucket=bucket, Key=key)\n\
+          \        print(f\"  Moved {key} -> {dest_key}\")\n\n    if not pairs:\n\
+          \        print(\"  No human feedback pairs found. Returning empty path.\"\
+          )\n        return \"\"\n\n    run_id = uuid.uuid4().hex[:12]\n    out_key\
+          \ = f\"preferences/human-feedback-batch-{run_id}.jsonl\"\n    body = \"\\\
+          n\".join(json.dumps(p) for p in pairs)\n    s3.put_object(Bucket=bucket,\
+          \ Key=out_key, Body=body.encode())\n\n    out_path = f\"s3://{bucket}/{out_key}\"\
+          \n    print(f\"  Wrote {len(pairs)} pairs to {out_path}\")\n    return out_path\n\
+          \n"
+        image: python:3.11-slim
+    exec-deploy-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - deploy_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kubernetes==32.0.1'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef deploy_model(\n    model_s3_path: str,\n    isvc_name: str,\n\
+          \    namespace: str,\n) -> str:\n    \"\"\"Patch InferenceService storageUri\
+          \ and wait for Ready.\"\"\"\n    import time\n    from kubernetes import\
+          \ client, config\n\n    print(\"=\" * 60)\n    print(\"DEPLOY MODEL STEP\"\
+          )\n    print(\"=\" * 60)\n    print(f\"  ISVC name:    {isvc_name}\")\n\
+          \    print(f\"  Namespace:    {namespace}\")\n    print(f\"  Model path:\
+          \   {model_s3_path}\")\n    print(\"=\" * 60)\n\n    config.load_incluster_config()\n\
+          \n    custom_api = client.CustomObjectsApi()\n    group = \"serving.kserve.io\"\
+          \n    version = \"v1beta1\"\n    plural = \"inferenceservices\"\n\n    storage_uri\
+          \ = model_s3_path\n    if not storage_uri.startswith(\"s3://\"):\n     \
+          \   storage_uri = f\"s3://{storage_uri}\"\n    if not storage_uri.endswith(\"\
+          /\"):\n        storage_uri += \"/\"\n\n    patch_body = {\n        \"spec\"\
+          : {\n            \"predictor\": {\n                \"minReplicas\": 1,\n\
+          \                \"model\": {\n                    \"storageUri\": storage_uri,\n\
+          \                }\n            }\n        }\n    }\n\n    print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Patching {isvc_name} storageUri -> {storage_uri}\")\n    custom_api.patch_namespaced_custom_object(\n\
+          \        group=group,\n        version=version,\n        namespace=namespace,\n\
+          \        plural=plural,\n        name=isvc_name,\n        body=patch_body,\n\
+          \    )\n\n    print(f\"[{time.strftime('%H:%M:%S')}] Patch applied. Waiting\
+          \ 30s for rollout to begin...\")\n    time.sleep(30)\n\n    # Wait for the\
+          \ ISVC to become Ready with the NEW storageUri (up to 10 min)\n    timeout\
+          \ = 600\n    poll_interval = 15\n    elapsed = 0\n\n    while elapsed <\
+          \ timeout:\n        isvc = custom_api.get_namespaced_custom_object(\n  \
+          \          group=group,\n            version=version,\n            namespace=namespace,\n\
+          \            plural=plural,\n            name=isvc_name,\n        )\n\n\
+          \        # Confirm the storageUri was actually updated\n        current_uri\
+          \ = (\n            isvc.get(\"spec\", {})\n            .get(\"predictor\"\
+          , {})\n            .get(\"model\", {})\n            .get(\"storageUri\"\
+          , \"\")\n        )\n        conditions = isvc.get(\"status\", {}).get(\"\
+          conditions\", [])\n        ready = any(\n            c.get(\"type\") ==\
+          \ \"Ready\" and c.get(\"status\") == \"True\"\n            for c in conditions\n\
+          \        )\n\n        if ready and current_uri == storage_uri:\n       \
+          \     url = isvc.get(\"status\", {}).get(\"url\", \"\")\n            print(f\"\
+          [{time.strftime('%H:%M:%S')}] ISVC {isvc_name} is Ready: {url}\")\n    \
+          \        svc_url = f\"http://{isvc_name}-predictor.{namespace}.svc.cluster.local:8080\"\
+          \n            print(f\"[{time.strftime('%H:%M:%S')}] Internal URL: {svc_url}\"\
+          )\n            print(f\"[{time.strftime('%H:%M:%S')}] Waiting 60s for vLLM\
+          \ to fully load model into GPU...\")\n            time.sleep(60)\n     \
+          \       print(f\"[{time.strftime('%H:%M:%S')}] Deploy complete.\")\n   \
+          \         return svc_url\n\n        status_msg = f\"ready={ready}, storageUri\
+          \ matches={current_uri == storage_uri}\"\n        print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Waiting for {isvc_name}... ({elapsed}s/{timeout}s) [{status_msg}]\")\n\
+          \        time.sleep(poll_interval)\n        elapsed += poll_interval\n\n\
+          \    raise TimeoutError(\n        f\"InferenceService {isvc_name} did not\
+          \ become Ready within {timeout}s\"\n    )\n\n"
+        image: python:3.11-slim
+    exec-deploy-model-2:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - deploy_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kubernetes==32.0.1'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef deploy_model(\n    model_s3_path: str,\n    isvc_name: str,\n\
+          \    namespace: str,\n) -> str:\n    \"\"\"Patch InferenceService storageUri\
+          \ and wait for Ready.\"\"\"\n    import time\n    from kubernetes import\
+          \ client, config\n\n    print(\"=\" * 60)\n    print(\"DEPLOY MODEL STEP\"\
+          )\n    print(\"=\" * 60)\n    print(f\"  ISVC name:    {isvc_name}\")\n\
+          \    print(f\"  Namespace:    {namespace}\")\n    print(f\"  Model path:\
+          \   {model_s3_path}\")\n    print(\"=\" * 60)\n\n    config.load_incluster_config()\n\
+          \n    custom_api = client.CustomObjectsApi()\n    group = \"serving.kserve.io\"\
+          \n    version = \"v1beta1\"\n    plural = \"inferenceservices\"\n\n    storage_uri\
+          \ = model_s3_path\n    if not storage_uri.startswith(\"s3://\"):\n     \
+          \   storage_uri = f\"s3://{storage_uri}\"\n    if not storage_uri.endswith(\"\
+          /\"):\n        storage_uri += \"/\"\n\n    patch_body = {\n        \"spec\"\
+          : {\n            \"predictor\": {\n                \"minReplicas\": 1,\n\
+          \                \"model\": {\n                    \"storageUri\": storage_uri,\n\
+          \                }\n            }\n        }\n    }\n\n    print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Patching {isvc_name} storageUri -> {storage_uri}\")\n    custom_api.patch_namespaced_custom_object(\n\
+          \        group=group,\n        version=version,\n        namespace=namespace,\n\
+          \        plural=plural,\n        name=isvc_name,\n        body=patch_body,\n\
+          \    )\n\n    print(f\"[{time.strftime('%H:%M:%S')}] Patch applied. Waiting\
+          \ 30s for rollout to begin...\")\n    time.sleep(30)\n\n    # Wait for the\
+          \ ISVC to become Ready with the NEW storageUri (up to 10 min)\n    timeout\
+          \ = 600\n    poll_interval = 15\n    elapsed = 0\n\n    while elapsed <\
+          \ timeout:\n        isvc = custom_api.get_namespaced_custom_object(\n  \
+          \          group=group,\n            version=version,\n            namespace=namespace,\n\
+          \            plural=plural,\n            name=isvc_name,\n        )\n\n\
+          \        # Confirm the storageUri was actually updated\n        current_uri\
+          \ = (\n            isvc.get(\"spec\", {})\n            .get(\"predictor\"\
+          , {})\n            .get(\"model\", {})\n            .get(\"storageUri\"\
+          , \"\")\n        )\n        conditions = isvc.get(\"status\", {}).get(\"\
+          conditions\", [])\n        ready = any(\n            c.get(\"type\") ==\
+          \ \"Ready\" and c.get(\"status\") == \"True\"\n            for c in conditions\n\
+          \        )\n\n        if ready and current_uri == storage_uri:\n       \
+          \     url = isvc.get(\"status\", {}).get(\"url\", \"\")\n            print(f\"\
+          [{time.strftime('%H:%M:%S')}] ISVC {isvc_name} is Ready: {url}\")\n    \
+          \        svc_url = f\"http://{isvc_name}-predictor.{namespace}.svc.cluster.local:8080\"\
+          \n            print(f\"[{time.strftime('%H:%M:%S')}] Internal URL: {svc_url}\"\
+          )\n            print(f\"[{time.strftime('%H:%M:%S')}] Waiting 60s for vLLM\
+          \ to fully load model into GPU...\")\n            time.sleep(60)\n     \
+          \       print(f\"[{time.strftime('%H:%M:%S')}] Deploy complete.\")\n   \
+          \         return svc_url\n\n        status_msg = f\"ready={ready}, storageUri\
+          \ matches={current_uri == storage_uri}\"\n        print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Waiting for {isvc_name}... ({elapsed}s/{timeout}s) [{status_msg}]\")\n\
+          \        time.sleep(poll_interval)\n        elapsed += poll_interval\n\n\
+          \    raise TimeoutError(\n        f\"InferenceService {isvc_name} did not\
+          \ become Ready within {timeout}s\"\n    )\n\n"
+        image: python:3.11-slim
+    exec-dpo-finetune:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - dpo_finetune
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kubernetes==31.0.0'\
+          \ 'boto3'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef dpo_finetune(\n    sft_model_s3_path: str,\n    pref_data_s3_path:\
+          \ str,\n    model_version: str,\n    s3_endpoint: str,\n    s3_access_key:\
+          \ str,\n    s3_secret_key: str,\n    num_epochs: int = 1,\n    batch_size:\
+          \ int = 1,\n    learning_rate: float = 5e-5,\n    lora_r: int = 16,\n  \
+          \  lora_alpha: int = 32,\n    dpo_beta: float = 0.1,\n    min_pairs: int\
+          \ = 3,\n) -> str:\n    \"\"\"Create a PyTorchJob for multi-GPU DPO training.\"\
+          \"\"\n    import time\n\n    import boto3\n    from kubernetes import client,\
+          \ config\n\n    print(\"=\" * 60)\n    print(\"DPO FINE-TUNE STEP (PyTorchJob,\
+          \ multi-GPU)\")\n    print(\"=\" * 60)\n    print(f\"  SFT model:    {sft_model_s3_path}\"\
+          )\n    print(f\"  Pref data:    {pref_data_s3_path}\")\n    print(f\"  Version:\
+          \      {model_version}\")\n    print(f\"  Epochs:       {num_epochs}\")\n\
+          \    print(f\"  Batch size:   {batch_size}\")\n    print(f\"  LR:      \
+          \     {learning_rate}\")\n    print(f\"  LoRA r/alpha: {lora_r}/{lora_alpha}\"\
+          )\n    print(f\"  DPO beta:     {dpo_beta}\")\n    print(f\"  Min pairs:\
+          \    {min_pairs}\")\n    print(\"=\" * 60)\n\n    model_output_s3_path =\
+          \ sft_model_s3_path\n\n    s3 = boto3.client(\n        \"s3\",\n       \
+          \ endpoint_url=s3_endpoint,\n        aws_access_key_id=s3_access_key,\n\
+          \        aws_secret_access_key=s3_secret_key,\n    )\n\n    parts = pref_data_s3_path.replace(\"\
+          s3://\", \"\").split(\"/\", 1)\n    obj = s3.get_object(Bucket=parts[0],\
+          \ Key=parts[1])\n    lines = [l for l in obj[\"Body\"].read().decode().strip().split(\"\
+          \\n\") if l.strip()]\n    num_pref_pairs = len(lines)\n\n    print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Preference data has {num_pref_pairs} pairs (min required: {min_pairs})\"\
+          )\n    if num_pref_pairs < min_pairs:\n        print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ SKIPPING DPO: only {num_pref_pairs} pairs (< {min_pairs}). Returning SFT\
+          \ model.\")\n        return sft_model_s3_path\n    print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Sufficient pairs. Proceeding with DPO training.\")\n\n    config.load_incluster_config()\n\
+          \    apps_api = client.AppsV1Api()\n    custom_api = client.CustomObjectsApi()\n\
+          \    core_api = client.CoreV1Api()\n\n    namespace = \"sridharproject\"\
+          \n    job_name = f\"dpo-{int(time.time())}\"\n    image = \"quay.io/rh-ee-srpillai/distillation-trainer:v1.1.4\"\
+          \n\n    # --- GPU evacuation and restore helpers ---\n    isvc_deployment\
+          \ = \"code-review-llm-predictor\"\n\n    def _scale_down_kserve():\n   \
+          \     try:\n            dep = apps_api.read_namespaced_deployment(isvc_deployment,\
+          \ namespace)\n            if dep.spec.replicas and dep.spec.replicas > 0:\n\
+          \                print(f\"[{time.strftime('%H:%M:%S')}] Scaling down {isvc_deployment}\
+          \ to free GPU node...\")\n                apps_api.patch_namespaced_deployment_scale(\n\
+          \                    isvc_deployment, namespace, {\"spec\": {\"replicas\"\
+          : 0}},\n                )\n                for _ in range(60):\n       \
+          \             time.sleep(5)\n                    pods = core_api.list_namespaced_pod(\n\
+          \                        namespace, label_selector=f\"app=isvc.{isvc_deployment}\"\
+          ,\n                    )\n                    if not pods.items:\n     \
+          \                   break\n                print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ {isvc_deployment} scaled to 0 -- GPU freed\")\n        except Exception\
+          \ as e:\n            print(f\"[{time.strftime('%H:%M:%S')}] KServe scale-down\
+          \ skipped: {e}\")\n\n    def _restore_kserve():\n        \"\"\"Scale KServe\
+          \ back up and wait until the pod is Ready.\"\"\"\n        try:\n       \
+          \     dep = apps_api.read_namespaced_deployment(isvc_deployment, namespace)\n\
+          \            if (dep.spec.replicas or 0) < 1:\n                print(f\"\
+          [{time.strftime('%H:%M:%S')}] Restoring {isvc_deployment} to 1 replica...\"\
+          )\n                apps_api.patch_namespaced_deployment_scale(\n       \
+          \             isvc_deployment, namespace, {\"spec\": {\"replicas\": 1}},\n\
+          \                )\n            for attempt in range(60):\n            \
+          \    time.sleep(10)\n                pods = core_api.list_namespaced_pod(\n\
+          \                    namespace, label_selector=f\"app=isvc.{isvc_deployment}\"\
+          ,\n                )\n                for pod in pods.items:\n         \
+          \           if all(\n                        cs.ready\n                \
+          \        for cs in (pod.status.container_statuses or [])\n             \
+          \       ):\n                        print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ {isvc_deployment} is Ready (waited {(attempt+1)*10}s)\")\n           \
+          \             return\n                if attempt % 6 == 5:\n           \
+          \         print(f\"[{time.strftime('%H:%M:%S')}] Still waiting for {isvc_deployment}\
+          \ to be Ready... ({(attempt+1)*10}s)\")\n            print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ WARNING: {isvc_deployment} not Ready after 600s, proceeding anyway\")\n\
+          \        except Exception as e:\n            print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ KServe restore failed: {e}\")\n\n    _scale_down_kserve()\n\n    # ---\
+          \ Discover GPU topology from the cluster ---\n    available_gpu_nodes =\
+          \ 0\n    gpus_per_node_list = []\n    blocked_taints = {\"node.kubernetes.io/unreachable\"\
+          , \"node.kubernetes.io/not-ready\"}\n    try:\n        nodes = core_api.list_node(label_selector=\"\
+          nvidia.com/gpu.present=true\")\n        all_pods = core_api.list_pod_for_all_namespaces(field_selector=\"\
+          status.phase=Running\").items\n        gpu_used_per_node = {}\n        for\
+          \ pod in all_pods:\n            node_name = pod.spec.node_name\n       \
+          \     if not node_name:\n                continue\n            for c in\
+          \ (pod.spec.containers or []):\n                req = (c.resources.requests\
+          \ or {}) if c.resources else {}\n                gpu_req = int(req.get(\"\
+          nvidia.com/gpu\", 0))\n                if gpu_req:\n                   \
+          \ gpu_used_per_node[node_name] = gpu_used_per_node.get(node_name, 0) + gpu_req\n\
+          \n        for node in nodes.items:\n            ready = any(\n         \
+          \       c.type == \"Ready\" and c.status == \"True\"\n                for\
+          \ c in (node.status.conditions or [])\n            )\n            tainted\
+          \ = any(\n                t.effect in (\"NoSchedule\", \"NoExecute\") and\
+          \ t.key in blocked_taints\n                for t in (node.spec.taints or\
+          \ [])\n            )\n            if ready and not tainted:\n          \
+          \      gpu_cap = int(node.status.allocatable.get(\"nvidia.com/gpu\", \"\
+          0\"))\n                gpu_used = gpu_used_per_node.get(node.metadata.name,\
+          \ 0)\n                gpu_free = gpu_cap - gpu_used\n                print(f\"\
+          [{time.strftime('%H:%M:%S')}]   Node {node.metadata.name}: {gpu_cap} total,\
+          \ {gpu_used} used, {gpu_free} free\")\n                if gpu_free >= 4:\n\
+          \                    available_gpu_nodes += 1\n                    gpus_per_node_list.append(gpu_free)\n\
+          \                else:\n                    print(f\"[{time.strftime('%H:%M:%S')}]\
+          \   -> Skipping (need 4 free GPUs, only {gpu_free})\")\n    except Exception\
+          \ as e:\n        print(f\"[{time.strftime('%H:%M:%S')}] Could not query\
+          \ nodes ({e}), falling back to 2 nodes x 4 GPUs\")\n        available_gpu_nodes\
+          \ = 2\n        gpus_per_node_list = [4, 4]\n\n    num_gpus_per_node = min(gpus_per_node_list)\
+          \ if gpus_per_node_list else 4\n    print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ GPU topology: {available_gpu_nodes} usable nodes x {num_gpus_per_node}\
+          \ GPUs/node\")\n\n    # --- Cap by dataset size: need >= 6 samples per GPU\
+          \ for meaningful DPO ---\n    min_samples_per_gpu = 6\n    max_data_nodes\
+          \ = max(1, num_pref_pairs // (min_samples_per_gpu * num_gpus_per_node))\n\
+          \n    num_total_nodes = min(max_data_nodes, available_gpu_nodes)\n    num_workers\
+          \ = max(0, num_total_nodes - 1)\n    total_gpus = num_total_nodes * num_gpus_per_node\n\
+          \    print(f\"[{time.strftime('%H:%M:%S')}] Auto-scaled DPO: {num_pref_pairs}\
+          \ pairs -> {num_total_nodes} nodes ({num_workers} workers) x {num_gpus_per_node}\
+          \ GPUs = {total_gpus} GPUs\")\n\n    env_list = [\n        {\"name\": \"\
+          TRAINING_MODE\", \"value\": \"dpo\"},\n        {\"name\": \"PREF_DATA_PATH\"\
+          , \"value\": pref_data_s3_path},\n        {\"name\": \"BASE_MODEL_ID\",\
+          \ \"value\": sft_model_s3_path},\n        {\"name\": \"MODEL_OUTPUT_S3_PATH\"\
+          , \"value\": model_output_s3_path},\n        {\"name\": \"NUM_EPOCHS\",\
+          \ \"value\": str(num_epochs)},\n        {\"name\": \"BATCH_SIZE\", \"value\"\
+          : str(batch_size)},\n        {\"name\": \"LEARNING_RATE\", \"value\": str(learning_rate)},\n\
+          \        {\"name\": \"LORA_R\", \"value\": str(lora_r)},\n        {\"name\"\
+          : \"LORA_ALPHA\", \"value\": str(lora_alpha)},\n        {\"name\": \"DPO_BETA\"\
+          , \"value\": str(dpo_beta)},\n        {\"name\": \"S3_ENDPOINT\", \"value\"\
+          : s3_endpoint},\n        {\"name\": \"S3_ACCESS_KEY\", \"value\": s3_access_key},\n\
+          \        {\"name\": \"S3_SECRET_KEY\", \"value\": s3_secret_key},\n    ]\n\
+          \n    container_spec = {\n        \"name\": \"pytorch\",\n        \"image\"\
+          : image,\n        \"env\": env_list,\n        \"resources\": {\n       \
+          \     \"requests\": {\n                \"nvidia.com/gpu\": str(num_gpus_per_node),\n\
+          \                \"memory\": \"48Gi\",\n                \"cpu\": \"8\",\n\
+          \            },\n            \"limits\": {\n                \"nvidia.com/gpu\"\
+          : str(num_gpus_per_node),\n                \"memory\": \"64Gi\",\n     \
+          \           \"cpu\": \"16\",\n            },\n        },\n        \"volumeMounts\"\
+          : [{\"name\": \"dshm\", \"mountPath\": \"/dev/shm\"}],\n    }\n\n    pod_spec\
+          \ = {\n        \"volumes\": [{\"name\": \"dshm\", \"emptyDir\": {\"medium\"\
+          : \"Memory\", \"sizeLimit\": \"8Gi\"}}],\n    }\n\n    node_selector = {\"\
+          nvidia.com/gpu.present\": \"true\"}\n\n    torchrun_args = [\n        f\"\
+          --nproc_per_node={num_gpus_per_node}\",\n        \"--master_port=29500\"\
+          ,\n        \"/opt/scripts/finetune_job.py\",\n    ]\n\n    pytorchjob =\
+          \ {\n        \"apiVersion\": \"kubeflow.org/v1\",\n        \"kind\": \"\
+          PyTorchJob\",\n        \"metadata\": {\"name\": job_name, \"namespace\"\
+          : namespace},\n        \"spec\": {\n            \"pytorchReplicaSpecs\"\
+          : {\n                \"Master\": {\n                    \"replicas\": 1,\n\
+          \                    \"restartPolicy\": \"Never\",\n                   \
+          \ \"template\": {\n                        \"spec\": {\n               \
+          \             **pod_spec,\n                            \"nodeSelector\"\
+          : node_selector,\n                            \"containers\": [{\n     \
+          \                           **container_spec,\n                        \
+          \        \"command\": [\"torchrun\"],\n                                \"\
+          args\": torchrun_args,\n                            }],\n              \
+          \          },\n                    },\n                },\n            \
+          \    \"Worker\": {\n                    \"replicas\": num_workers,\n   \
+          \                 \"restartPolicy\": \"Never\",\n                    \"\
+          template\": {\n                        \"spec\": {\n                   \
+          \         **pod_spec,\n                            \"nodeSelector\": node_selector,\n\
+          \                            \"containers\": [{\n                      \
+          \          **container_spec,\n                                \"command\"\
+          : [\"torchrun\"],\n                                \"args\": torchrun_args,\n\
+          \                            }],\n                        },\n         \
+          \           },\n                },\n            },\n        },\n    }\n\n\
+          \    custom_api.create_namespaced_custom_object(\n        group=\"kubeflow.org\"\
+          ,\n        version=\"v1\",\n        namespace=namespace,\n        plural=\"\
+          pytorchjobs\",\n        body=pytorchjob,\n    )\n\n    poll_interval = 30\n\
+          \    timeout = 36000\n    elapsed = 0\n\n    total_gpus = num_total_nodes\
+          \ * num_gpus_per_node\n    print(f\"[{time.strftime('%H:%M:%S')}] Submitted\
+          \ DPO PyTorchJob {job_name} ({num_total_nodes} nodes x {num_gpus_per_node}\
+          \ GPUs = {total_gpus} total)\")\n    print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Output will go to: {model_output_s3_path}\")\n    print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Timeout set to {timeout}s ({timeout/3600:.1f}h)\")\n\n    def _model_s3_timestamp():\n\
+          \        \"\"\"Return LastModified of model.safetensors, or None if missing.\"\
+          \"\"\n        try:\n            bucket = model_output_s3_path.replace(\"\
+          s3://\", \"\").split(\"/\", 1)[0]\n            prefix = model_output_s3_path.replace(\"\
+          s3://\", \"\").split(\"/\", 1)[1]\n            resp = s3.head_object(Bucket=bucket,\
+          \ Key=prefix + \"model.safetensors\")\n            return resp[\"LastModified\"\
+          ]\n        except Exception:\n            return None\n\n    model_ts_before\
+          \ = _model_s3_timestamp()\n    print(f\"[{time.strftime('%H:%M:%S')}] Model\
+          \ timestamp before DPO: {model_ts_before}\")\n\n    def _model_is_new()\
+          \ -> bool:\n        ts = _model_s3_timestamp()\n        if ts is None:\n\
+          \            return False\n        if model_ts_before is None:\n       \
+          \     return True\n        return ts > model_ts_before\n\n    result = None\n\
+          \    try:\n        job_failed = False\n        fail_msg = \"\"\n\n     \
+          \   while elapsed < timeout:\n            time.sleep(poll_interval)\n  \
+          \          elapsed += poll_interval\n\n            if _model_is_new():\n\
+          \                hrs, rem = divmod(elapsed, 3600)\n                mins\
+          \ = rem // 60\n                status = \"Failed\" if job_failed else \"\
+          Running/Succeeded\"\n                print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ DPO model updated in S3 (job status={status}, elapsed={hrs}h{mins}m).\
+          \ Success.\")\n                try:\n                    custom_api.delete_namespaced_custom_object(\n\
+          \                        group=\"kubeflow.org\", version=\"v1\", namespace=namespace,\n\
+          \                        plural=\"pytorchjobs\", name=job_name,\n      \
+          \              )\n                except Exception:\n                  \
+          \  pass\n                result = model_output_s3_path\n               \
+          \ return result\n\n            if job_failed:\n                print(f\"\
+          [{time.strftime('%H:%M:%S')}] Waiting for model upload... (elapsed={elapsed}s)\"\
+          )\n                continue\n\n            try:\n                job = custom_api.get_namespaced_custom_object(\n\
+          \                    group=\"kubeflow.org\", version=\"v1\", namespace=namespace,\n\
+          \                    plural=\"pytorchjobs\", name=job_name,\n          \
+          \      )\n            except Exception as e:\n                print(f\"\
+          [{time.strftime('%H:%M:%S')}] Could not fetch job status ({e}), will retry...\"\
+          )\n                continue\n\n            conditions = job.get(\"status\"\
+          , {}).get(\"conditions\", [])\n            for c in conditions:\n      \
+          \          ctype = c.get(\"type\")\n                if ctype == \"Succeeded\"\
+          \ and c.get(\"status\") == \"True\":\n                    hrs, rem = divmod(elapsed,\
+          \ 3600)\n                    mins = rem // 60\n                    print(f\"\
+          [{time.strftime('%H:%M:%S')}] DPO PyTorchJob {job_name} succeeded ({hrs}h{mins}m)\"\
+          )\n                    result = model_output_s3_path\n                 \
+          \   return result\n                if ctype == \"Failed\" and c.get(\"status\"\
+          ) == \"True\":\n                    job_failed = True\n                \
+          \    fail_msg = c.get(\"message\", \"unknown error\")\n                \
+          \    print(f\"[{time.strftime('%H:%M:%S')}] DPO job {job_name} status=Failed.\
+          \ Continuing to poll S3 for model upload...\")\n                    break\n\
+          \n            if not job_failed:\n                hrs, rem = divmod(elapsed,\
+          \ 3600)\n                mins = rem // 60\n                print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ DPO PyTorchJob {job_name} running (elapsed={hrs}h{mins}m)\")\n\n     \
+          \   if job_failed:\n            try:\n                pods = core_api.list_namespaced_pod(\n\
+          \                    namespace=namespace,\n                    label_selector=f\"\
+          training.kubeflow.org/job-name={job_name}\",\n                )\n      \
+          \          if pods.items:\n                    pod_name = pods.items[0].metadata.name\n\
+          \                    logs = core_api.read_namespaced_pod_log(\n        \
+          \                name=pod_name, namespace=namespace, tail_lines=100,\n \
+          \                   )\n                    fail_msg = f\"{fail_msg}\\n\\\
+          n--- Pod {pod_name} logs ---\\n{logs}\"\n            except Exception as\
+          \ e:\n                fail_msg = f\"{fail_msg} (could not fetch pod logs:\
+          \ {e})\"\n            raise RuntimeError(f\"DPO PyTorchJob {job_name} failed\
+          \ and model never appeared in S3: {fail_msg}\")\n\n        raise TimeoutError(f\"\
+          DPO PyTorchJob {job_name} did not complete within {timeout}s\")\n    finally:\n\
+          \        print(f\"[{time.strftime('%H:%M:%S')}] DPO step done. Restoring\
+          \ KServe student model...\")\n        _restore_kserve()\n\n"
+        image: python:3.11-slim
+    exec-evaluate:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - evaluate
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'requests' 'mlflow'\
+          \ 'boto3'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef evaluate(\n    student_url: str,\n    teacher_api_url: str,\n\
+          \    teacher_model: str,\n    teacher_api_key: str,\n    test_questions:\
+          \ list,\n    mlflow_tracking_uri: str = \"\",\n    model_version: str =\
+          \ \"unknown\",\n    s3_endpoint: str = \"\",\n    s3_access_key: str = \"\
+          \",\n    s3_secret_key: str = \"\",\n) -> dict:\n    \"\"\"Send test questions\
+          \ to Student, have Teacher grade responses, log to MLflow.\"\"\"\n    import\
+          \ json\n    import os\n    import sys\n    import time\n    import requests\n\
+          \    import mlflow\n\n    sys.stdout.reconfigure(line_buffering=True)\n\n\
+          \    if mlflow_tracking_uri.startswith(\"https://\"):\n        os.environ.setdefault(\"\
+          MLFLOW_TRACKING_INSECURE_TLS\", \"true\")\n\n    if s3_endpoint:\n     \
+          \   os.environ.setdefault(\"MLFLOW_S3_ENDPOINT_URL\", s3_endpoint)\n   \
+          \     if s3_endpoint.startswith(\"https://\"):\n            os.environ.setdefault(\"\
+          MLFLOW_S3_IGNORE_TLS\", \"true\")\n    if s3_access_key:\n        os.environ.setdefault(\"\
+          AWS_ACCESS_KEY_ID\", s3_access_key)\n    if s3_secret_key:\n        os.environ.setdefault(\"\
+          AWS_SECRET_ACCESS_KEY\", s3_secret_key)\n\n    api_url = teacher_api_url.rstrip(\"\
+          /\")\n    if not api_url.endswith(\"/v1/chat/completions\"):\n        api_url\
+          \ = api_url.rstrip(\"/\") + \"/v1/chat/completions\"\n\n    api_headers\
+          \ = {\"Content-Type\": \"application/json\"}\n    if teacher_api_key:\n\
+          \        api_headers[\"Authorization\"] = f\"Bearer {teacher_api_key}\"\n\
+          \n    print(\"=\" * 60)\n    print(\"EVALUATE MODEL STEP\")\n    print(\"\
+          =\" * 60)\n    print(f\"  Student URL:   {student_url}\")\n    print(f\"\
+          \  Teacher API:   {api_url}\")\n    print(f\"  Teacher model: {teacher_model}\"\
+          )\n    print(f\"  Model version: {model_version}\")\n    print(f\"  Questions:\
+          \     {len(test_questions)}\")\n    print(f\"  MLflow URI:    {mlflow_tracking_uri\
+          \ or '(not set)'}\")\n    print(\"=\" * 60)\n\n    GRADING_PROMPT = (\n\
+          \        \"You are an expert code review grader. Rate the following AI-generated\
+          \ code review \"\n        \"on a scale of 1 to 10 based on these criteria:\\\
+          n\"\n        \"- Issue identification: Did it find the real problem (not\
+          \ a hallucinated one)?\\n\"\n        \"- Technical accuracy: Is the explanation\
+          \ correct?\\n\"\n        \"- Actionability: Is the suggestion concrete and\
+          \ implementable?\\n\"\n        \"- Severity accuracy: Is the severity rating\
+          \ appropriate?\\n\"\n        \"- False positive avoidance: Did it avoid\
+          \ flagging non-issues?\\n\"\n        \"A score of 1 means completely wrong\
+          \ or hallucinated issues. \"\n        \"A score of 10 means a perfect, reviewer-quality\
+          \ response.\\n\"\n        'Respond with ONLY a JSON object: {\"score\":\
+          \ <number>, \"reason\": \"<brief reason>\"}'\n    )\n\n    def query_student(question:\
+          \ str, max_retries: int = 10) -> str:\n        for attempt in range(max_retries):\n\
+          \            try:\n                resp = requests.post(\n             \
+          \       f\"{student_url}/v1/chat/completions\",\n                    json={\n\
+          \                        \"model\": \"/mnt/models\",\n                 \
+          \       \"messages\": [{\"role\": \"user\", \"content\": question}],\n \
+          \                       \"max_tokens\": 256,\n                        \"\
+          temperature\": 0.3,\n                    },\n                    timeout=120,\n\
+          \                )\n                if resp.status_code in (400, 404, 503):\n\
+          \                    wait = min(20 * (attempt + 1), 120)\n             \
+          \       print(f\"  [{attempt+1}/{max_retries}] HTTP {resp.status_code},\
+          \ vLLM not ready. Retry in {wait}s\")\n                    time.sleep(wait)\n\
+          \                    continue\n                if not resp.ok:\n       \
+          \             print(f\"  HTTP {resp.status_code} from student: {resp.text[:500]}\"\
+          )\n                resp.raise_for_status()\n                return resp.json()[\"\
+          choices\"][0][\"message\"][\"content\"]\n            except (requests.ConnectionError,\
+          \ requests.Timeout) as e:\n                wait = min(20 * (attempt + 1),\
+          \ 120)\n                print(f\"  [{attempt+1}/{max_retries}] Connection\
+          \ error, retry in {wait}s: {e}\")\n                time.sleep(wait)\n  \
+          \      raise RuntimeError(f\"Student unreachable after {max_retries} retries\"\
+          )\n\n    def _teacher_call(messages: list, max_tokens: int = 512, temperature:\
+          \ float = 0.7) -> str:\n        \"\"\"Call teacher LLM API with exponential\
+          \ backoff on 429/5xx errors.\"\"\"\n        last_error = None\n        for\
+          \ attempt in range(8):\n            try:\n                resp = requests.post(\n\
+          \                    api_url,\n                    headers=api_headers,\n\
+          \                    json={\n                        \"model\": teacher_model,\n\
+          \                        \"messages\": messages,\n                     \
+          \   \"max_tokens\": max_tokens,\n                        \"temperature\"\
+          : temperature,\n                    },\n                    timeout=600,\n\
+          \                )\n                if resp.status_code == 429 or resp.status_code\
+          \ >= 500:\n                    wait = min(2 ** attempt * 5, 120)\n     \
+          \               print(f\"  [{resp.status_code}] Server error, waiting {wait}s\
+          \ (attempt {attempt+1}/8)\")\n                    last_error = f\"HTTP {resp.status_code}\"\
+          \n                    time.sleep(wait)\n                    continue\n \
+          \               resp.raise_for_status()\n                return resp.json()[\"\
+          choices\"][0][\"message\"][\"content\"]\n            except (requests.ConnectionError,\
+          \ requests.Timeout) as e:\n                wait = min(2 ** attempt * 5,\
+          \ 120)\n                print(f\"  [Connection error] {e}, waiting {wait}s\
+          \ (attempt {attempt+1}/8)\")\n                last_error = str(e)\n    \
+          \            time.sleep(wait)\n        raise RuntimeError(f\"Teacher unreachable\
+          \ after 8 retries. Last error: {last_error}\")\n\n    def query_teacher(question:\
+          \ str) -> str:\n        return _teacher_call([\n            {\"role\": \"\
+          system\", \"content\": \"You are a helpful and concise assistant.\"},\n\
+          \            {\"role\": \"user\", \"content\": question},\n        ], max_tokens=512,\
+          \ temperature=0.7)\n\n    def teacher_grade(question: str, answer: str)\
+          \ -> dict:\n        raw = _teacher_call([\n            {\"role\": \"system\"\
+          , \"content\": GRADING_PROMPT},\n            {\"role\": \"user\", \"content\"\
+          : f\"Question: {question}\\n\\nStudent Response: {answer}\"},\n        ],\
+          \ max_tokens=200, temperature=0.0)\n        try:\n            return json.loads(raw)\n\
+          \        except json.JSONDecodeError:\n            import re\n         \
+          \   m = re.search(r'```(?:json)?\\s*(\\{.*?\\})\\s*```', raw, re.DOTALL)\n\
+          \            if m:\n                try:\n                    return json.loads(m.group(1))\n\
+          \                except json.JSONDecodeError:\n                    pass\n\
+          \            m2 = re.search(r'\\{[^{}]*\"score\"\\s*:\\s*\\d+[^{}]*\\}',\
+          \ raw)\n            if m2:\n                try:\n                    return\
+          \ json.loads(m2.group(0))\n                except json.JSONDecodeError:\n\
+          \                    pass\n            return {\"score\": 0, \"reason\"\
+          : f\"Failed to parse: {raw}\"}\n\n    print(\"\\n\" + \"=\" * 60)\n    results\
+          \ = []\n    for i, q in enumerate(test_questions):\n        print(f\"\\\
+          n--- Question {i+1}/{len(test_questions)} ---\")\n        print(f\"Q: {q}\"\
+          )\n\n        student_answer = query_student(q)\n        print(f\"\\nStudent:\\\
+          n{student_answer}\\n\")\n\n        grade = teacher_grade(q, student_answer)\n\
+          \        print(f\"Teacher Grade: {grade['score']}/10\")\n        print(f\"\
+          Reason: {grade.get('reason', 'N/A')}\")\n\n        results.append({\n  \
+          \          \"question\": q,\n            \"student_answer\": student_answer,\n\
+          \            \"student_score\": grade[\"score\"],\n            \"reason\"\
+          : grade.get(\"reason\", \"\"),\n        })\n        time.sleep(3)\n\n  \
+          \  student_scores = [r[\"student_score\"] for r in results if isinstance(r.get(\"\
+          student_score\"), (int, float))]\n    student_avg = sum(student_scores)\
+          \ / len(student_scores) if student_scores else 0.0\n\n    # Teacher baseline\
+          \ -- same questions, Teacher answers, then self-grade\n    print(\"\\n\"\
+          \ + \"=\" * 60)\n    print(\"TEACHER BASELINE\")\n    print(\"=\" * 60)\n\
+          \    for i, r in enumerate(results):\n        q = r[\"question\"]\n    \
+          \    teacher_answer = query_teacher(q)\n        teacher_grade_result = teacher_grade(q,\
+          \ teacher_answer)\n        r[\"teacher_answer\"] = teacher_answer\n    \
+          \    r[\"teacher_score\"] = teacher_grade_result[\"score\"]\n        print(f\"\
+          \  Q{i+1}: {teacher_grade_result['score']}/10\")\n        time.sleep(3)\n\
+          \n    teacher_scores = [r[\"teacher_score\"] for r in results if isinstance(r.get(\"\
+          teacher_score\"), (int, float))]\n    teacher_avg = sum(teacher_scores)\
+          \ / len(teacher_scores) if teacher_scores else 0.0\n\n    print(\"\\n\"\
+          \ + \"=\" * 60)\n    print(\"FINAL RESULTS\")\n    print(\"=\" * 60)\n \
+          \   for i, r in enumerate(results):\n        print(f\"  Q{i+1}: student={r['student_score']}/10\
+          \  teacher={r['teacher_score']}/10 -- {r.get('reason', '')}\")\n    print(f\"\
+          \\n  Student Avg: {student_avg:.2f}/10\")\n    print(f\"  Teacher Avg: {teacher_avg:.2f}/10\"\
+          )\n    print(f\"  Score Gap:   {teacher_avg - student_avg:.2f}\")\n    print(\"\
+          =\" * 60)\n\n    # Log to MLflow\n    if mlflow_tracking_uri:\n        mlflow.set_tracking_uri(mlflow_tracking_uri)\n\
+          \        mlflow.set_experiment(\"CodeReview-Eval-Hub\")\n        with mlflow.start_run(run_name=f\"\
+          pipeline-eval-{model_version}\"):\n            mlflow.set_tag(\"model_version\"\
+          , model_version)\n            mlflow.set_tag(\"eval_type\", \"pipeline_benchmark\"\
+          )\n            mlflow.log_metric(\"student_avg_score\", round(student_avg,\
+          \ 4))\n            mlflow.log_metric(\"teacher_avg_score\", round(teacher_avg,\
+          \ 4))\n            mlflow.log_metric(\"score_gap\", round(teacher_avg -\
+          \ student_avg, 4))\n            for i, r in enumerate(results):\n      \
+          \          mlflow.log_metric(f\"q{i+1}_student_score\", r[\"student_score\"\
+          ])\n                mlflow.log_metric(f\"q{i+1}_teacher_score\", r[\"teacher_score\"\
+          ])\n            mlflow.log_dict({\"results\": results}, \"eval_results.json\"\
+          )\n        print(f\"MLflow run logged to {mlflow_tracking_uri}\")\n    else:\n\
+          \        print(\"mlflow_tracking_uri not set -- skipping MLflow logging\"\
+          )\n\n    return {\n        \"num_questions\": len(results),\n        \"\
+          student_avg_score\": round(student_avg, 2),\n        \"teacher_avg_score\"\
+          : round(teacher_avg, 2),\n        \"score_gap\": round(teacher_avg - student_avg,\
+          \ 2),\n        \"results\": results,\n    }\n\n"
+        image: python:3.11-slim
+    exec-extract-code-review-gold:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - extract_code_review_gold
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'boto3'  && \
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef extract_code_review_gold(\n    s3_endpoint: str,\n    s3_access_key:\
+          \ str,\n    s3_secret_key: str,\n    synthetic_bucket: str,\n    synthetic_prefix:\
+          \ str,\n    output_s3_path: str,\n) -> str:\n    \"\"\"Read pre-built code\
+          \ review training JSONL from MinIO.\n\n    Unlike the generic extract_gold,\
+          \ this component reads JSONL files\n    that already have a `text` field\
+          \ in ChatML format, so no instruction/output\n    parsing is needed.\n \
+          \   \"\"\"\n    import json\n    import random\n    import boto3\n\n   \
+          \ print(\"=\" * 60)\n    print(\"EXTRACT CODE REVIEW GOLD DATA STEP\")\n\
+          \    print(\"=\" * 60)\n    print(f\"  Source:  s3://{synthetic_bucket}/{synthetic_prefix}\"\
+          )\n    print(f\"  Output:  {output_s3_path}\")\n    print(\"=\" * 60)\n\n\
+          \    s3 = boto3.client(\n        \"s3\",\n        endpoint_url=s3_endpoint,\n\
+          \        aws_access_key_id=s3_access_key,\n        aws_secret_access_key=s3_secret_key,\n\
+          \    )\n\n    records = []\n    paginator = s3.get_paginator(\"list_objects_v2\"\
+          )\n\n    for page in paginator.paginate(Bucket=synthetic_bucket, Prefix=synthetic_prefix):\n\
+          \        for item in page.get(\"Contents\", []):\n            key = item[\"\
+          Key\"]\n            if not key.endswith(\".jsonl\"):\n                continue\n\
+          \            try:\n                body = s3.get_object(Bucket=synthetic_bucket,\
+          \ Key=key)[\"Body\"].read().decode(\"utf-8\")\n                for line\
+          \ in body.strip().splitlines():\n                    line = line.strip()\n\
+          \                    if not line:\n                        continue\n  \
+          \                  record = json.loads(line)\n                    if not\
+          \ record.get(\"text\"):\n                        continue\n            \
+          \        records.append(record)\n            except Exception as exc:\n\
+          \                print(f\"Warning: skipping {key}: {exc}\")\n\n    print(f\"\
+          Loaded {len(records)} training records from s3://{synthetic_bucket}/{synthetic_prefix}\"\
+          )\n\n    if len(records) > 1:\n        random.shuffle(records)\n\n    out_parts\
+          \ = output_s3_path.replace(\"s3://\", \"\").split(\"/\", 1)\n    out_bucket,\
+          \ out_key = out_parts[0], out_parts[1]\n    body = \"\\n\".join(json.dumps(r)\
+          \ for r in records)\n    s3.put_object(Bucket=out_bucket, Key=out_key, Body=body.encode())\n\
+          \    print(f\"Uploaded {len(records)} gold records to {output_s3_path}\"\
+          )\n\n    return output_s3_path\n\n"
+        image: python:3.11-slim
+    exec-extract-preferences:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - extract_preferences
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'requests' 'mlflow'\
+          \ 'boto3'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef extract_preferences(\n    student_url: str,\n    teacher_api_url:\
+          \ str,\n    teacher_model: str,\n    teacher_api_key: str,\n    question_bank_s3_path:\
+          \ str,\n    mlflow_tracking_uri: str,\n    sft_run_name_prefix: str,\n \
+          \   model_version: str,\n    s3_endpoint: str,\n    s3_access_key: str,\n\
+          \    s3_secret_key: str,\n    pref_output_bucket: str = \"mlflow-artifacts\"\
+          ,\n    min_score_gap: int = 1,\n    max_supplement_questions: int = 50,\n\
+          ) -> str:\n    \"\"\"Build DPO preference pairs from eval results + supplementary\
+          \ question bank queries.\"\"\"\n    import json\n    import os\n    import\
+          \ sys\n    import time\n    import uuid\n    from concurrent.futures import\
+          \ ThreadPoolExecutor\n\n    import boto3\n    import mlflow\n    import\
+          \ requests\n\n    sys.stdout.reconfigure(line_buffering=True)\n\n    print(\"\
+          =\" * 60)\n    print(\"EXTRACT PREFERENCE PAIRS STEP\")\n    print(\"=\"\
+          \ * 60)\n    print(f\"  Student URL:   {student_url}\")\n    print(f\" \
+          \ Teacher API:   {teacher_api_url}\")\n    print(f\"  Teacher model: {teacher_model}\"\
+          )\n    print(f\"  Question bank: {question_bank_s3_path}\")\n    print(f\"\
+          \  Version:       {model_version}\")\n    print(f\"  Min score gap: {min_score_gap}\"\
+          )\n    print(f\"  Max supplement: {max_supplement_questions}\")\n    print(\"\
+          =\" * 60)\n\n    if mlflow_tracking_uri.startswith(\"https://\"):\n    \
+          \    os.environ.setdefault(\"MLFLOW_TRACKING_INSECURE_TLS\", \"true\")\n\
+          \    if s3_endpoint:\n        os.environ.setdefault(\"MLFLOW_S3_ENDPOINT_URL\"\
+          , s3_endpoint)\n        os.environ.setdefault(\"AWS_ACCESS_KEY_ID\", s3_access_key)\n\
+          \        os.environ.setdefault(\"AWS_SECRET_ACCESS_KEY\", s3_secret_key)\n\
+          \n    s3 = boto3.client(\n        \"s3\",\n        endpoint_url=s3_endpoint,\n\
+          \        aws_access_key_id=s3_access_key,\n        aws_secret_access_key=s3_secret_key,\n\
+          \    )\n\n    api_url = teacher_api_url.rstrip(\"/\")\n    if not api_url.endswith(\"\
+          /v1/chat/completions\"):\n        api_url = api_url.rstrip(\"/\") + \"/v1/chat/completions\"\
+          \n\n    headers = {\"Content-Type\": \"application/json\"}\n    if teacher_api_key:\n\
+          \        headers[\"Authorization\"] = f\"Bearer {teacher_api_key}\"\n\n\
+          \    def teacher_llm_call(messages: list, max_tokens: int = 512, temperature:\
+          \ float = 0.7) -> str:\n        last_error = None\n        for attempt in\
+          \ range(8):\n            try:\n                resp = requests.post(\n \
+          \                   api_url,\n                    headers=headers,\n   \
+          \                 json={\n                        \"model\": teacher_model,\n\
+          \                        \"messages\": messages,\n                     \
+          \   \"max_tokens\": max_tokens,\n                        \"temperature\"\
+          : temperature,\n                    },\n                    timeout=600,\n\
+          \                )\n                if resp.status_code == 429 or resp.status_code\
+          \ >= 500:\n                    wait = min(2 ** attempt * 5, 120)\n     \
+          \               print(f\"  [{resp.status_code}] Server error, waiting {wait}s\
+          \ (attempt {attempt+1}/8)\")\n                    last_error = f\"HTTP {resp.status_code}\"\
+          \n                    time.sleep(wait)\n                    continue\n \
+          \               resp.raise_for_status()\n                return resp.json()[\"\
+          choices\"][0][\"message\"][\"content\"]\n            except (requests.ConnectionError,\
+          \ requests.Timeout) as e:\n                wait = min(2 ** attempt * 5,\
+          \ 120)\n                print(f\"  [Connection error] {e}, waiting {wait}s\
+          \ (attempt {attempt+1}/8)\")\n                last_error = str(e)\n    \
+          \            time.sleep(wait)\n        print(f\"  [Teacher] All 8 retries\
+          \ exhausted. Last error: {last_error}\")\n        return \"\"\n\n    def\
+          \ wait_for_student_ready(max_wait: int = 300) -> bool:\n        \"\"\"Block\
+          \ until the student model responds to a health check.\"\"\"\n        print(f\"\
+          \  Checking student readiness at {student_url}...\")\n        start = time.time()\n\
+          \        while time.time() - start < max_wait:\n            try:\n     \
+          \           r = requests.get(f\"{student_url}/v1/models\", timeout=10)\n\
+          \                if r.ok:\n                    print(f\"  Student is ready\
+          \ ({int(time.time()-start)}s)\")\n                    return True\n    \
+          \            print(f\"  Student returned {r.status_code}, retrying...\"\
+          )\n            except (requests.ConnectionError, requests.Timeout):\n  \
+          \              print(f\"  Student not reachable yet ({int(time.time()-start)}s)...\"\
+          )\n            time.sleep(15)\n        print(f\"  WARNING: Student not ready\
+          \ after {max_wait}s\")\n        return False\n\n    def query_student(question:\
+          \ str) -> str:\n        for attempt in range(8):\n            try:\n   \
+          \             resp = requests.post(\n                    f\"{student_url}/v1/chat/completions\"\
+          ,\n                    json={\n                        \"model\": \"/mnt/models\"\
+          ,\n                        \"messages\": [{\"role\": \"user\", \"content\"\
+          : question}],\n                        \"max_tokens\": 256,\n          \
+          \              \"temperature\": 0.3,\n                    },\n         \
+          \           timeout=180,\n                )\n                if resp.status_code\
+          \ in (400, 404, 503):\n                    wait = min(20 * (attempt + 1),\
+          \ 120)\n                    print(f\"    [Student {resp.status_code}] Retry\
+          \ {attempt+1}/8 in {wait}s\")\n                    time.sleep(wait)\n  \
+          \                  continue\n                resp.raise_for_status()\n \
+          \               return resp.json()[\"choices\"][0][\"message\"][\"content\"\
+          ]\n            except (requests.ConnectionError, requests.Timeout) as e:\n\
+          \                wait = min(20 * (attempt + 1), 120)\n                print(f\"\
+          \    [Student conn error] {e}, retry {attempt+1}/8 in {wait}s\")\n     \
+          \           time.sleep(wait)\n        print(\"    [Student] All retries\
+          \ exhausted, returning empty\")\n        return \"\"\n\n    def query_teacher(question:\
+          \ str) -> str:\n        return teacher_llm_call([\n            {\"role\"\
+          : \"system\", \"content\": \"You are a helpful and concise assistant.\"\
+          },\n            {\"role\": \"user\", \"content\": question},\n        ],\
+          \ max_tokens=512, temperature=0.7)\n\n    GRADING_PROMPT = (\n        \"\
+          You are an expert code review grader. Rate the following AI-generated code\
+          \ review \"\n        \"on a scale of 1 to 10 based on these criteria:\\\
+          n\"\n        \"- Issue identification: Did it find the real problem (not\
+          \ a hallucinated one)?\\n\"\n        \"- Technical accuracy: Is the explanation\
+          \ correct?\\n\"\n        \"- Actionability: Is the suggestion concrete and\
+          \ implementable?\\n\"\n        \"- Severity accuracy: Is the severity rating\
+          \ appropriate?\\n\"\n        \"- False positive avoidance: Did it avoid\
+          \ flagging non-issues?\\n\"\n        \"A score of 1 means completely wrong\
+          \ or hallucinated issues. \"\n        \"A score of 10 means a perfect, reviewer-quality\
+          \ response.\\n\"\n        'Respond with ONLY a JSON object: {\"score\":\
+          \ <number>, \"reason\": \"<brief reason>\"}'\n    )\n\n    def grade(question:\
+          \ str, answer: str) -> int:\n        raw = teacher_llm_call([\n        \
+          \    {\"role\": \"system\", \"content\": GRADING_PROMPT},\n            {\"\
+          role\": \"user\", \"content\": f\"Question: {question}\\n\\nResponse: {answer}\"\
+          },\n        ], max_tokens=200, temperature=0.0)\n        try:\n        \
+          \    return int(json.loads(raw)[\"score\"])\n        except (json.JSONDecodeError,\
+          \ KeyError, ValueError):\n            return 5\n\n    preference_pairs =\
+          \ []\n\n    # =====================================================================\n\
+          \    # Source A: Previous eval_results.json from MLflow\n    # =====================================================================\n\
+          \    print(\"=\" * 60)\n    print(\"SOURCE A: Previous eval results from\
+          \ MLflow\")\n    print(\"=\" * 60)\n    try:\n        print(\"  Connecting\
+          \ to MLflow...\")\n        mlflow.set_tracking_uri(mlflow_tracking_uri)\n\
+          \        experiment = mlflow.get_experiment_by_name(\"CodeReview-Eval-Hub\"\
+          )\n        if experiment:\n            print(f\"  Found experiment: {experiment.experiment_id}\"\
+          )\n            runs = mlflow.search_runs(\n                experiment_ids=[experiment.experiment_id],\n\
+          \                filter_string=f\"tags.eval_type = 'pipeline_benchmark'\"\
+          ,\n                order_by=[\"start_time DESC\"],\n                max_results=1,\n\
+          \            )\n            if not runs.empty:\n                run_id =\
+          \ runs.iloc[0][\"run_id\"]\n                print(f\"  Found eval run: {run_id}\"\
+          )\n                print(f\"  Downloading eval_results.json artifact...\"\
+          )\n                artifact_path = mlflow.artifacts.download_artifacts(\n\
+          \                    run_id=run_id, artifact_path=\"eval_results.json\"\n\
+          \                )\n                print(f\"  Downloaded artifact to: {artifact_path}\"\
+          )\n                with open(artifact_path) as f:\n                    eval_data\
+          \ = json.load(f)\n\n                results = eval_data.get(\"results\"\
+          , eval_data) if isinstance(eval_data, dict) else eval_data\n           \
+          \     if isinstance(results, dict):\n                    results = results.get(\"\
+          results\", [])\n                print(f\"  Loaded {len(results)} results\
+          \ from eval_results.json\")\n\n                for i, r in enumerate(results):\n\
+          \                    student_score = r.get(\"student_score\", 10)\n    \
+          \                teacher_score = r.get(\"teacher_score\", 0)\n         \
+          \           gap = teacher_score - student_score\n\n                    if\
+          \ gap >= min_score_gap and r.get(\"teacher_answer\") and r.get(\"student_answer\"\
+          ):\n                        preference_pairs.append({\n                \
+          \            \"prompt\": r[\"question\"],\n                            \"\
+          chosen\": r[\"teacher_answer\"],\n                            \"rejected\"\
+          : r[\"student_answer\"],\n                            \"source\": \"eval_results\"\
+          ,\n                            \"score_gap\": gap,\n                   \
+          \     })\n                    if (i + 1) % 25 == 0:\n                  \
+          \      print(f\"    Scanned {i+1}/{len(results)} results, {len(preference_pairs)}\
+          \ pairs so far\")\n                print(f\"  Source A: {len(preference_pairs)}\
+          \ pairs from eval results (gap >= {min_score_gap})\")\n            else:\n\
+          \                print(\"  No previous eval runs found in MLflow\")\n  \
+          \      else:\n            print(\"  Experiment 'CodeReview-Eval-Hub' not\
+          \ found\")\n    except Exception as exc:\n        import traceback\n   \
+          \     print(f\"  Source A failed: {exc}\")\n        traceback.print_exc()\n\
+          \n    # =====================================================================\n\
+          \    # Source B: Supplement from question bank\n    # =====================================================================\n\
+          \    print(\"\\n\" + \"=\" * 60)\n    print(\"SOURCE B: Question bank supplement\"\
+          )\n    print(\"=\" * 60)\n    wait_for_student_ready(max_wait=600)\n\n \
+          \   try:\n        print(f\"  Downloading question bank from {question_bank_s3_path}...\"\
+          )\n        parts = question_bank_s3_path.replace(\"s3://\", \"\").split(\"\
+          /\", 1)\n        qb_bucket, qb_key = parts[0], parts[1]\n        obj = s3.get_object(Bucket=qb_bucket,\
+          \ Key=qb_key)\n        qb_data = json.loads(obj[\"Body\"].read().decode())\n\
+          \        print(f\"  Question bank downloaded, keys: {list(qb_data.keys())}\"\
+          )\n\n        all_questions = qb_data.get(\"all_questions\", [])\n      \
+          \  if not all_questions and \"topics\" in qb_data:\n            for topic_qs\
+          \ in qb_data[\"topics\"].values():\n                all_questions.extend(topic_qs)\n\
+          \        print(f\"  Total questions in bank: {len(all_questions)}\")\n\n\
+          \        existing_prompts = {p[\"prompt\"].lower().strip() for p in preference_pairs}\n\
+          \        supplement_qs = [q for q in all_questions if q.lower().strip()\
+          \ not in existing_prompts]\n        supplement_qs = supplement_qs[:max_supplement_questions]\n\
+          \        print(f\"  After dedup, will query {len(supplement_qs)} supplement\
+          \ questions\")\n\n        print(f\"  Querying {len(supplement_qs)} questions\
+          \ against Student + Teacher (parallel)...\")\n        source_b_count = 0\n\
+          \        executor = ThreadPoolExecutor(max_workers=2)\n        for i, q\
+          \ in enumerate(supplement_qs):\n            q_preview = q[:80].replace('\\\
+          n', ' ')\n            print(f\"    [{i+1}/{len(supplement_qs)}] Querying\
+          \ student + teacher in parallel... ({q_preview}...)\")\n\n            fut_student\
+          \ = executor.submit(query_student, q)\n            fut_teacher = executor.submit(query_teacher,\
+          \ q)\n            student_answer = fut_student.result()\n            teacher_answer\
+          \ = fut_teacher.result()\n\n            if not student_answer:\n       \
+          \         print(f\"    [{i+1}] Student returned empty, skipping\")\n   \
+          \             continue\n            if not teacher_answer:\n           \
+          \     print(f\"    [{i+1}] Teacher returned empty, skipping\")\n       \
+          \         continue\n            print(f\"    [{i+1}] Student={len(student_answer)}ch\
+          \ Teacher={len(teacher_answer)}ch, grading both in parallel...\")\n\n  \
+          \          fut_gs = executor.submit(grade, q, student_answer)\n        \
+          \    fut_gt = executor.submit(grade, q, teacher_answer)\n            student_score\
+          \ = fut_gs.result()\n            teacher_score = fut_gt.result()\n\n   \
+          \         gap = teacher_score - student_score\n            print(f\"   \
+          \ [{i+1}] Student={student_score} Teacher={teacher_score} Gap={gap} {'->\
+          \ PAIR' if gap >= min_score_gap else '-> skip'}\")\n\n            if gap\
+          \ >= min_score_gap:\n                preference_pairs.append({\n       \
+          \             \"prompt\": q,\n                    \"chosen\": teacher_answer,\n\
+          \                    \"rejected\": student_answer,\n                   \
+          \ \"source\": \"question_bank\",\n                    \"score_gap\": gap,\n\
+          \                })\n                source_b_count += 1\n\n           \
+          \ if (i + 1) % 10 == 0:\n                print(f\"  -- Progress: [{i+1}/{len(supplement_qs)}]\
+          \ {source_b_count} pairs collected --\")\n        executor.shutdown(wait=False)\n\
+          \n        print(f\"  Source B: {source_b_count} pairs from question bank\"\
+          )\n    except Exception as exc:\n        import traceback\n        print(f\"\
+          \  Source B failed: {exc}\")\n        traceback.print_exc()\n\n    # =====================================================================\n\
+          \    # Write preferences to MinIO\n    # =====================================================================\n\
+          \    print(f\"\\n{'=' * 60}\")\n    print(f\"PREFERENCE EXTRACTION COMPLETE\"\
+          )\n    print(f\"{'=' * 60}\")\n    print(f\"  Total preference pairs: {len(preference_pairs)}\"\
+          )\n    by_source = {}\n    for p in preference_pairs:\n        src = p.get(\"\
+          source\", \"unknown\")\n        by_source[src] = by_source.get(src, 0) +\
+          \ 1\n    for src, cnt in by_source.items():\n        print(f\"    {src}:\
+          \ {cnt} pairs\")\n\n    run_id = uuid.uuid4().hex[:12]\n    pref_key = f\"\
+          preferences/pref-{model_version}-{run_id}.jsonl\"\n    body = \"\\n\".join(json.dumps(p)\
+          \ for p in preference_pairs)\n\n    print(f\"  Uploading to s3://{pref_output_bucket}/{pref_key}\
+          \ ({len(body)} bytes)...\")\n    s3.put_object(Bucket=pref_output_bucket,\
+          \ Key=pref_key, Body=body.encode())\n    pref_s3_path = f\"s3://{pref_output_bucket}/{pref_key}\"\
+          \n    print(f\"  Uploaded -> {pref_s3_path}\")\n\n    return pref_s3_path\n\
+          \n"
+        image: python:3.11-slim
+    exec-finetune:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - finetune
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kubernetes==31.0.0'\
+          \ 'boto3'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef finetune(\n    gold_data_path: str,\n    model_output_s3_path:\
+          \ str,\n    base_model_id: str,\n    s3_endpoint: str,\n    s3_access_key:\
+          \ str,\n    s3_secret_key: str,\n    num_epochs: int = 3,\n    batch_size:\
+          \ int = 4,\n    learning_rate: float = 2e-4,\n    lora_r: int = 16,\n  \
+          \  lora_alpha: int = 32,\n) -> str:\n    \"\"\"Create a PyTorchJob for multi-GPU\
+          \ QLoRA SFT training.\"\"\"\n    import time\n\n    import boto3\n    from\
+          \ kubernetes import client, config\n\n    config.load_incluster_config()\n\
+          \n    s3 = boto3.client(\n        \"s3\",\n        endpoint_url=s3_endpoint,\n\
+          \        aws_access_key_id=s3_access_key,\n        aws_secret_access_key=s3_secret_key,\n\
+          \    )\n    apps_api = client.AppsV1Api()\n    custom_api = client.CustomObjectsApi()\n\
+          \    core_api = client.CoreV1Api()\n\n    namespace = \"sridharproject\"\
+          \n    job_name = f\"finetune-{int(time.time())}\"\n    image = \"quay.io/rh-ee-srpillai/distillation-trainer:v1.1.4\"\
+          \n\n    # --- GPU evacuation and restore helpers ---\n    isvc_deployment\
+          \ = \"code-review-llm-predictor\"\n\n    def _scale_down_kserve():\n   \
+          \     try:\n            dep = apps_api.read_namespaced_deployment(isvc_deployment,\
+          \ namespace)\n            if dep.spec.replicas and dep.spec.replicas > 0:\n\
+          \                print(f\"[{time.strftime('%H:%M:%S')}] Scaling down {isvc_deployment}\
+          \ to free GPU node...\")\n                apps_api.patch_namespaced_deployment_scale(\n\
+          \                    isvc_deployment, namespace, {\"spec\": {\"replicas\"\
+          : 0}},\n                )\n                for _ in range(60):\n       \
+          \             time.sleep(5)\n                    pods = core_api.list_namespaced_pod(\n\
+          \                        namespace, label_selector=f\"app=isvc.{isvc_deployment}\"\
+          ,\n                    )\n                    if not pods.items:\n     \
+          \                   break\n                print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ {isvc_deployment} scaled to 0 -- GPU freed\")\n        except Exception\
+          \ as e:\n            print(f\"[{time.strftime('%H:%M:%S')}] KServe scale-down\
+          \ skipped: {e}\")\n\n    def _restore_kserve():\n        \"\"\"Scale KServe\
+          \ back up and wait until the pod is Ready.\"\"\"\n        try:\n       \
+          \     dep = apps_api.read_namespaced_deployment(isvc_deployment, namespace)\n\
+          \            if (dep.spec.replicas or 0) < 1:\n                print(f\"\
+          [{time.strftime('%H:%M:%S')}] Restoring {isvc_deployment} to 1 replica...\"\
+          )\n                apps_api.patch_namespaced_deployment_scale(\n       \
+          \             isvc_deployment, namespace, {\"spec\": {\"replicas\": 1}},\n\
+          \                )\n            for attempt in range(60):\n            \
+          \    time.sleep(10)\n                pods = core_api.list_namespaced_pod(\n\
+          \                    namespace, label_selector=f\"app=isvc.{isvc_deployment}\"\
+          ,\n                )\n                for pod in pods.items:\n         \
+          \           if all(\n                        cs.ready\n                \
+          \        for cs in (pod.status.container_statuses or [])\n             \
+          \       ):\n                        print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ {isvc_deployment} is Ready (waited {(attempt+1)*10}s)\")\n           \
+          \             return\n                if attempt % 6 == 5:\n           \
+          \         print(f\"[{time.strftime('%H:%M:%S')}] Still waiting for {isvc_deployment}\
+          \ to be Ready... ({(attempt+1)*10}s)\")\n            print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ WARNING: {isvc_deployment} not Ready after 600s, proceeding anyway\")\n\
+          \        except Exception as e:\n            print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ KServe restore failed: {e}\")\n\n    _scale_down_kserve()\n\n    # ---\
+          \ Discover GPU topology from the cluster ---\n    available_gpu_nodes =\
+          \ 0\n    gpus_per_node_list = []\n    blocked_taints = {\"node.kubernetes.io/unreachable\"\
+          , \"node.kubernetes.io/not-ready\"}\n    try:\n        nodes = core_api.list_node(label_selector=\"\
+          nvidia.com/gpu.present=true\")\n        all_pods = core_api.list_pod_for_all_namespaces(field_selector=\"\
+          status.phase=Running\").items\n        gpu_used_per_node = {}\n        for\
+          \ pod in all_pods:\n            node_name = pod.spec.node_name\n       \
+          \     if not node_name:\n                continue\n            for c in\
+          \ (pod.spec.containers or []):\n                req = (c.resources.requests\
+          \ or {}) if c.resources else {}\n                gpu_req = int(req.get(\"\
+          nvidia.com/gpu\", 0))\n                if gpu_req:\n                   \
+          \ gpu_used_per_node[node_name] = gpu_used_per_node.get(node_name, 0) + gpu_req\n\
+          \n        for node in nodes.items:\n            ready = any(\n         \
+          \       c.type == \"Ready\" and c.status == \"True\"\n                for\
+          \ c in (node.status.conditions or [])\n            )\n            tainted\
+          \ = any(\n                t.effect in (\"NoSchedule\", \"NoExecute\") and\
+          \ t.key in blocked_taints\n                for t in (node.spec.taints or\
+          \ [])\n            )\n            if ready and not tainted:\n          \
+          \      gpu_cap = int(node.status.allocatable.get(\"nvidia.com/gpu\", \"\
+          0\"))\n                gpu_used = gpu_used_per_node.get(node.metadata.name,\
+          \ 0)\n                gpu_free = gpu_cap - gpu_used\n                print(f\"\
+          [{time.strftime('%H:%M:%S')}]   Node {node.metadata.name}: {gpu_cap} total,\
+          \ {gpu_used} used, {gpu_free} free\")\n                if gpu_free >= 4:\n\
+          \                    available_gpu_nodes += 1\n                    gpus_per_node_list.append(gpu_free)\n\
+          \                else:\n                    print(f\"[{time.strftime('%H:%M:%S')}]\
+          \   -> Skipping (need 4 free GPUs, only {gpu_free})\")\n    except Exception\
+          \ as e:\n        print(f\"[{time.strftime('%H:%M:%S')}] Could not query\
+          \ nodes ({e}), falling back to 2 nodes x 4 GPUs\")\n        available_gpu_nodes\
+          \ = 2\n        gpus_per_node_list = [4, 4]\n\n    num_gpus_per_node = min(gpus_per_node_list)\
+          \ if gpus_per_node_list else 4\n    num_workers = max(0, available_gpu_nodes\
+          \ - 1)\n    total_gpus = available_gpu_nodes * num_gpus_per_node\n    print(f\"\
+          [{time.strftime('%H:%M:%S')}] GPU topology: {available_gpu_nodes} usable\
+          \ nodes x {num_gpus_per_node} GPUs/node = {total_gpus} total\")\n\n    print(\"\
+          =\" * 60)\n    print(\"SFT FINE-TUNE STEP (PyTorchJob, multi-node multi-GPU)\"\
+          )\n    print(\"=\" * 60)\n    print(f\"  Job name:     {job_name}\")\n \
+          \   print(f\"  Image:        {image}\")\n    print(f\"  Nodes:        1\
+          \ Master + {num_workers} Workers = {available_gpu_nodes} nodes\")\n    print(f\"\
+          \  GPUs/node:    {num_gpus_per_node}\")\n    print(f\"  Total GPUs:   {total_gpus}\"\
+          )\n    print(f\"  Base model:   {base_model_id}\")\n    print(f\"  Gold\
+          \ data:    {gold_data_path}\")\n    print(f\"  Output:       {model_output_s3_path}\"\
+          )\n    print(f\"  Epochs:       {num_epochs}\")\n    print(f\"  Batch size:\
+          \   {batch_size}\")\n    print(f\"  LR:           {learning_rate}\")\n \
+          \   print(f\"  LoRA r/alpha: {lora_r}/{lora_alpha}\")\n    print(\"=\" *\
+          \ 60)\n\n    env_list = [\n        {\"name\": \"GOLD_DATA_PATH\", \"value\"\
+          : gold_data_path},\n        {\"name\": \"MODEL_OUTPUT_S3_PATH\", \"value\"\
+          : model_output_s3_path},\n        {\"name\": \"BASE_MODEL_ID\", \"value\"\
+          : base_model_id},\n        {\"name\": \"NUM_EPOCHS\", \"value\": str(num_epochs)},\n\
+          \        {\"name\": \"BATCH_SIZE\", \"value\": str(batch_size)},\n     \
+          \   {\"name\": \"LEARNING_RATE\", \"value\": str(learning_rate)},\n    \
+          \    {\"name\": \"LORA_R\", \"value\": str(lora_r)},\n        {\"name\"\
+          : \"LORA_ALPHA\", \"value\": str(lora_alpha)},\n        {\"name\": \"S3_ENDPOINT\"\
+          , \"value\": s3_endpoint},\n        {\"name\": \"S3_ACCESS_KEY\", \"value\"\
+          : s3_access_key},\n        {\"name\": \"S3_SECRET_KEY\", \"value\": s3_secret_key},\n\
+          \    ]\n\n    container_spec = {\n        \"name\": \"pytorch\",\n     \
+          \   \"image\": image,\n        \"env\": env_list,\n        \"resources\"\
+          : {\n            \"requests\": {\n                \"nvidia.com/gpu\": str(num_gpus_per_node),\n\
+          \                \"memory\": \"48Gi\",\n                \"cpu\": \"8\",\n\
+          \            },\n            \"limits\": {\n                \"nvidia.com/gpu\"\
+          : str(num_gpus_per_node),\n                \"memory\": \"64Gi\",\n     \
+          \           \"cpu\": \"16\",\n            },\n        },\n        \"volumeMounts\"\
+          : [{\"name\": \"dshm\", \"mountPath\": \"/dev/shm\"}],\n    }\n\n    pod_spec\
+          \ = {\n        \"volumes\": [{\"name\": \"dshm\", \"emptyDir\": {\"medium\"\
+          : \"Memory\", \"sizeLimit\": \"8Gi\"}}],\n    }\n\n    node_selector = {\"\
+          nvidia.com/gpu.present\": \"true\"}\n\n    torchrun_args = [\n        f\"\
+          --nproc_per_node={num_gpus_per_node}\",\n        \"--master_port=29500\"\
+          ,\n        \"/opt/scripts/finetune_job.py\",\n    ]\n\n    pytorchjob =\
+          \ {\n        \"apiVersion\": \"kubeflow.org/v1\",\n        \"kind\": \"\
+          PyTorchJob\",\n        \"metadata\": {\"name\": job_name, \"namespace\"\
+          : namespace},\n        \"spec\": {\n            \"pytorchReplicaSpecs\"\
+          : {\n                \"Master\": {\n                    \"replicas\": 1,\n\
+          \                    \"restartPolicy\": \"Never\",\n                   \
+          \ \"template\": {\n                        \"spec\": {\n               \
+          \             **pod_spec,\n                            \"nodeSelector\"\
+          : node_selector,\n                            \"containers\": [{\n     \
+          \                           **container_spec,\n                        \
+          \        \"command\": [\"torchrun\"],\n                                \"\
+          args\": torchrun_args,\n                            }],\n              \
+          \          },\n                    },\n                },\n            \
+          \    \"Worker\": {\n                    \"replicas\": num_workers,\n   \
+          \                 \"restartPolicy\": \"Never\",\n                    \"\
+          template\": {\n                        \"spec\": {\n                   \
+          \         **pod_spec,\n                            \"nodeSelector\": node_selector,\n\
+          \                            \"containers\": [{\n                      \
+          \          **container_spec,\n                                \"command\"\
+          : [\"torchrun\"],\n                                \"args\": torchrun_args,\n\
+          \                            }],\n                        },\n         \
+          \           },\n                },\n            },\n        },\n    }\n\n\
+          \    custom_api.create_namespaced_custom_object(\n        group=\"kubeflow.org\"\
+          ,\n        version=\"v1\",\n        namespace=namespace,\n        plural=\"\
+          pytorchjobs\",\n        body=pytorchjob,\n    )\n\n    poll_interval = 30\n\
+          \    timeout = 36000\n    elapsed = 0\n\n    print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Submitted PyTorchJob {job_name} ({available_gpu_nodes} nodes x {num_gpus_per_node}\
+          \ GPUs = {total_gpus} total)\")\n    print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ Timeout set to {timeout}s ({timeout/3600:.1f}h)\")\n\n    def _model_s3_timestamp():\n\
+          \        try:\n            bucket = model_output_s3_path.replace(\"s3://\"\
+          , \"\").split(\"/\", 1)[0]\n            prefix = model_output_s3_path.replace(\"\
+          s3://\", \"\").split(\"/\", 1)[1]\n            resp = s3.head_object(Bucket=bucket,\
+          \ Key=prefix + \"model.safetensors\")\n            return resp[\"LastModified\"\
+          ]\n        except Exception:\n            return None\n\n    model_ts_before\
+          \ = _model_s3_timestamp()\n\n    def _model_is_new() -> bool:\n        ts\
+          \ = _model_s3_timestamp()\n        if ts is None:\n            return False\n\
+          \        if model_ts_before is None:\n            return True\n        return\
+          \ ts > model_ts_before\n\n    result = None\n    try:\n        job_failed\
+          \ = False\n        fail_msg = \"\"\n\n        while elapsed < timeout:\n\
+          \            time.sleep(poll_interval)\n            elapsed += poll_interval\n\
+          \n            if _model_is_new():\n                hrs, rem = divmod(elapsed,\
+          \ 3600)\n                mins = rem // 60\n                status = \"Failed\"\
+          \ if job_failed else \"Running/Succeeded\"\n                print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ SFT model updated in S3 (job status={status}, elapsed={hrs}h{mins}m).\
+          \ Success.\")\n                try:\n                    custom_api.delete_namespaced_custom_object(\n\
+          \                        group=\"kubeflow.org\", version=\"v1\", namespace=namespace,\n\
+          \                        plural=\"pytorchjobs\", name=job_name,\n      \
+          \              )\n                except Exception:\n                  \
+          \  pass\n                result = model_output_s3_path\n               \
+          \ return result\n\n            if job_failed:\n                print(f\"\
+          [{time.strftime('%H:%M:%S')}] Waiting for model upload... (elapsed={elapsed}s)\"\
+          )\n                continue\n\n            try:\n                job = custom_api.get_namespaced_custom_object(\n\
+          \                    group=\"kubeflow.org\", version=\"v1\", namespace=namespace,\n\
+          \                    plural=\"pytorchjobs\", name=job_name,\n          \
+          \      )\n            except Exception as e:\n                print(f\"\
+          [{time.strftime('%H:%M:%S')}] Could not fetch job status ({e}), will retry...\"\
+          )\n                continue\n\n            conditions = job.get(\"status\"\
+          , {}).get(\"conditions\", [])\n            for c in conditions:\n      \
+          \          ctype = c.get(\"type\")\n                if ctype == \"Succeeded\"\
+          \ and c.get(\"status\") == \"True\":\n                    hrs, rem = divmod(elapsed,\
+          \ 3600)\n                    mins = rem // 60\n                    print(f\"\
+          [{time.strftime('%H:%M:%S')}] PyTorchJob {job_name} succeeded ({hrs}h{mins}m)\"\
+          )\n                    result = model_output_s3_path\n                 \
+          \   return result\n                if ctype == \"Failed\" and c.get(\"status\"\
+          ) == \"True\":\n                    job_failed = True\n                \
+          \    fail_msg = c.get(\"message\", \"unknown error\")\n                \
+          \    print(f\"[{time.strftime('%H:%M:%S')}] SFT job {job_name} status=Failed.\
+          \ Continuing to poll S3 for model upload...\")\n                    break\n\
+          \n            if not job_failed:\n                hrs, rem = divmod(elapsed,\
+          \ 3600)\n                mins = rem // 60\n                print(f\"[{time.strftime('%H:%M:%S')}]\
+          \ PyTorchJob {job_name} running (elapsed={hrs}h{mins}m)\")\n\n        if\
+          \ job_failed:\n            try:\n                pods = core_api.list_namespaced_pod(\n\
+          \                    namespace=namespace,\n                    label_selector=f\"\
+          training.kubeflow.org/job-name={job_name}\",\n                )\n      \
+          \          if pods.items:\n                    pod_name = pods.items[0].metadata.name\n\
+          \                    logs = core_api.read_namespaced_pod_log(\n        \
+          \                name=pod_name, namespace=namespace, tail_lines=100,\n \
+          \                   )\n                    fail_msg = f\"{fail_msg}\\n\\\
+          n--- Pod {pod_name} logs ---\\n{logs}\"\n            except Exception as\
+          \ e:\n                fail_msg = f\"{fail_msg} (could not fetch pod logs:\
+          \ {e})\"\n            raise RuntimeError(f\"PyTorchJob {job_name} failed\
+          \ and model never appeared in S3: {fail_msg}\")\n\n        raise TimeoutError(f\"\
+          PyTorchJob {job_name} did not complete within {timeout}s\")\n    finally:\n\
+          \        print(f\"[{time.strftime('%H:%M:%S')}] SFT step done. Restoring\
+          \ KServe student model...\")\n        _restore_kserve()\n\n"
+        image: python:3.11-slim
+    exec-merge-preferences:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - merge_preferences
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'boto3'  && \
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef merge_preferences(\n    pipeline_pref_path: str,\n    human_feedback_path:\
+          \ str,\n    s3_endpoint: str,\n    s3_access_key: str,\n    s3_secret_key:\
+          \ str,\n    bucket: str = \"mlflow-artifacts\",\n) -> str:\n    \"\"\"Merge\
+          \ pipeline-generated and human-feedback preference pairs.\"\"\"\n    import\
+          \ json\n    import uuid\n\n    import boto3\n\n    print(\"=\" * 60)\n \
+          \   print(\"MERGE PREFERENCES STEP\")\n    print(\"=\" * 60)\n    print(f\"\
+          \  Pipeline prefs:  {pipeline_pref_path}\")\n    print(f\"  Human feedback:\
+          \  {human_feedback_path or '(none)'}\")\n\n    s3 = boto3.client(\n    \
+          \    \"s3\",\n        endpoint_url=s3_endpoint,\n        aws_access_key_id=s3_access_key,\n\
+          \        aws_secret_access_key=s3_secret_key,\n    )\n\n    all_pairs =\
+          \ []\n\n    def read_jsonl_from_s3(s3_path: str, label: str) -> int:\n \
+          \       if not s3_path:\n            print(f\"  {label}: empty path, skipping\"\
+          )\n            return 0\n        parts = s3_path.replace(\"s3://\", \"\"\
+          ).split(\"/\", 1)\n        obj = s3.get_object(Bucket=parts[0], Key=parts[1])\n\
+          \        lines = [l for l in obj[\"Body\"].read().decode().strip().split(\"\
+          \\n\") if l.strip()]\n        count = 0\n        for line in lines:\n  \
+          \          pair = json.loads(line)\n            if pair.get(\"prompt\")\
+          \ and pair.get(\"chosen\") and pair.get(\"rejected\"):\n               \
+          \ all_pairs.append(pair)\n                count += 1\n        print(f\"\
+          \  {label}: {count} pairs\")\n        return count\n\n    pipeline_count\
+          \ = read_jsonl_from_s3(pipeline_pref_path, \"Pipeline preferences\")\n \
+          \   human_count = read_jsonl_from_s3(human_feedback_path, \"Human feedback\"\
+          )\n\n    print(f\"  Total merged: {len(all_pairs)} pairs ({pipeline_count}\
+          \ pipeline + {human_count} human)\")\n\n    if not all_pairs:\n        print(\"\
+          \  No pairs to merge. Returning pipeline path as-is.\")\n        return\
+          \ pipeline_pref_path\n\n    run_id = uuid.uuid4().hex[:12]\n    out_key\
+          \ = f\"preferences/merged-{run_id}.jsonl\"\n    body = \"\\n\".join(json.dumps(p)\
+          \ for p in all_pairs)\n    s3.put_object(Bucket=bucket, Key=out_key, Body=body.encode())\n\
+          \n    out_path = f\"s3://{bucket}/{out_key}\"\n    print(f\"  Wrote merged\
+          \ preferences to {out_path}\")\n    return out_path\n\n"
+        image: python:3.11-slim
+    exec-resolve-version:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - resolve_version
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'boto3'  && \
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef resolve_version(\n    s3_endpoint: str,\n    s3_access_key: str,\n\
+          \    s3_secret_key: str,\n    model_bucket: str,\n    model_prefix: str,\n\
+          \    gold_bucket: str,\n    hf_base_model_id: str = \"Qwen/Qwen2.5-Coder-1.5B-Instruct\"\
+          ,\n    explicit_version: str = \"\",\n) -> NamedTuple(\"VersionOutputs\"\
+          , [(\"version\", str), (\"gold_data_path\", str), (\"model_output_path\"\
+          , str), (\"prev_model_path\", str)]):\n    \"\"\"Find the latest student-1b-vN/\
+          \ in MinIO and return vN+1 with paths.\"\"\"\n    import re\n    from collections\
+          \ import namedtuple\n    import boto3\n\n    print(\"=\" * 60)\n    print(\"\
+          RESOLVE VERSION STEP\")\n    print(\"=\" * 60)\n    print(f\"  Model bucket:\
+          \ {model_bucket}\")\n    print(f\"  Model prefix: {model_prefix}\")\n  \
+          \  print(f\"  Gold bucket:  {gold_bucket}\")\n    print(f\"  Explicit ver:\
+          \ {explicit_version or '(auto)'}\")\n    print(\"=\" * 60)\n\n    s3 = boto3.client(\n\
+          \        \"s3\",\n        endpoint_url=s3_endpoint,\n        aws_access_key_id=s3_access_key,\n\
+          \        aws_secret_access_key=s3_secret_key,\n    )\n\n    paginator =\
+          \ s3.get_paginator(\"list_objects_v2\")\n    version_numbers = []\n\n  \
+          \  for page in paginator.paginate(Bucket=model_bucket, Prefix=model_prefix,\
+          \ Delimiter=\"/\"):\n        for cp in page.get(\"CommonPrefixes\", []):\n\
+          \            folder = cp[\"Prefix\"]\n            match = re.search(r\"\
+          -v(\\d+)/?$\", folder)\n            if match:\n                version_numbers.append(int(match.group(1)))\n\
+          \n    if explicit_version:\n        version = explicit_version\n       \
+          \ print(f\"Using explicit version: {version}\")\n    elif version_numbers:\n\
+          \        latest = max(version_numbers)\n        version = f\"v{latest +\
+          \ 1}\"\n        print(f\"Found versions: {sorted(version_numbers)}. Latest:\
+          \ v{latest}. Next: {version}\")\n    else:\n        version = \"v1\"\n \
+          \       print(f\"No existing versions found under {model_bucket}/{model_prefix}.\
+          \ Starting at {version}\")\n\n    if version_numbers:\n        prev_version\
+          \ = max(version_numbers)\n        prev_model_path = f\"s3://{model_bucket}/{model_prefix}v{prev_version}/\"\
+          \n        print(f\"Previous model: {prev_model_path} (iterative SFT will\
+          \ start from here)\")\n    else:\n        prev_model_path = hf_base_model_id\n\
+          \        print(f\"No previous model found -- SFT will start from HuggingFace\
+          \ base: {hf_base_model_id}\")\n\n    gold_data_path = f\"s3://{gold_bucket}/gold/train-{version}.jsonl\"\
+          \n    model_output_path = f\"s3://{model_bucket}/{model_prefix}{version}/\"\
+          \n\n    print(f\"Version: {version}\")\n    print(f\"Gold data path: {gold_data_path}\"\
+          )\n    print(f\"Model output path: {model_output_path}\")\n    print(f\"\
+          Prev model path: {prev_model_path or '(none)'}\")\n\n    Outputs = namedtuple(\"\
+          VersionOutputs\", [\"version\", \"gold_data_path\", \"model_output_path\"\
+          , \"prev_model_path\"])\n    return Outputs(version=version, gold_data_path=gold_data_path,\
+          \ model_output_path=model_output_path, prev_model_path=prev_model_path)\n\
+          \n"
+        image: python:3.11-slim
+pipelineInfo:
+  description: 'Code Review SLM: SFT + DPO distillation on Go/Python/K8s code diffs
+    using Qwen2.5-Coder-1.5B.'
+  name: code-review-slm
+root:
+  dag:
+    tasks:
+      collect-human-feedback:
+        cachingOptions: {}
+        componentRef:
+          name: comp-collect-human-feedback
+        dependentTasks:
+        - deploy-model
+        inputs:
+          parameters:
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_endpoint:
+              runtimeValue:
+                constant: http://minio.sridharproject.svc.cluster.local:9000
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+        taskInfo:
+          name: collect-human-feedback
+      deploy-model:
+        cachingOptions: {}
+        componentRef:
+          name: comp-deploy-model
+        dependentTasks:
+        - finetune
+        inputs:
+          parameters:
+            isvc_name:
+              runtimeValue:
+                constant: code-review-llm
+            model_s3_path:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: finetune
+            namespace:
+              runtimeValue:
+                constant: sridharproject
+        taskInfo:
+          name: deploy-model
+      deploy-model-2:
+        cachingOptions: {}
+        componentRef:
+          name: comp-deploy-model-2
+        dependentTasks:
+        - dpo-finetune
+        inputs:
+          parameters:
+            isvc_name:
+              runtimeValue:
+                constant: code-review-llm
+            model_s3_path:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: dpo-finetune
+            namespace:
+              runtimeValue:
+                constant: sridharproject
+        taskInfo:
+          name: deploy-model-2
+      dpo-finetune:
+        cachingOptions: {}
+        componentRef:
+          name: comp-dpo-finetune
+        dependentTasks:
+        - finetune
+        - merge-preferences
+        - resolve-version
+        inputs:
+          parameters:
+            dpo_beta:
+              componentInputParameter: dpo_beta
+            min_pairs:
+              componentInputParameter: min_dpo_pairs
+            model_version:
+              taskOutputParameter:
+                outputParameterKey: version
+                producerTask: resolve-version
+            num_epochs:
+              componentInputParameter: dpo_epochs
+            pref_data_s3_path:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: merge-preferences
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_endpoint:
+              runtimeValue:
+                constant: http://minio.sridharproject.svc.cluster.local:9000
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+            sft_model_s3_path:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: finetune
+        taskInfo:
+          name: dpo-finetune
+      evaluate:
+        cachingOptions: {}
+        componentRef:
+          name: comp-evaluate
+        dependentTasks:
+        - deploy-model-2
+        - resolve-version
+        inputs:
+          parameters:
+            mlflow_tracking_uri:
+              runtimeValue:
+                constant: http://mlflow.sridharproject.svc.cluster.local:5000
+            model_version:
+              taskOutputParameter:
+                outputParameterKey: version
+                producerTask: resolve-version
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_endpoint:
+              runtimeValue:
+                constant: http://minio.sridharproject.svc.cluster.local:9000
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+            student_url:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: deploy-model-2
+            teacher_api_key:
+              componentInputParameter: teacher_api_key
+            teacher_api_url:
+              componentInputParameter: teacher_api_url
+            teacher_model:
+              componentInputParameter: teacher_model
+            test_questions:
+              runtimeValue:
+                constant:
+                - "Review the following code diff and identify any issues:\n\nFile:\
+                  \ pkg/controller/job_controller.go\nLanguage: Go\n\n```diff\n@@\
+                  \ -189,7 +189,7 @@\n func (p *Progress) buildProgressServerCaCrtConfigMap(ctx\
+                  \ context.Context, trainJob *trainer.TrainJob) (*corev1ac.ConfigMapApplyConfiguration,\
+                  \ error) {\n \tsecret := &corev1.Secret{}\n \tif err := p.client.Get(ctx,\
+                  \ secretKey, secret); err == nil {\n \t\tif _, ok := secret.Data[\"\
+                  ca.crt\"]; !ok {\n-\t\t\treturn nil, fmt.Errorf(\"ca.crt not found:\
+                  \ %w\", err)\n+\t\t\treturn nil, fmt.Errorf(\"ca.crt not found in\
+                  \ TLS secret\")\n \t\t}\n```"
+                - 'Review the following code diff and identify any issues:
+
+
+                  File: test/e2e/testdata/status_update.py
+
+                  Language: Python
+
+
+                  ```diff
+
+                  @@ -0,0 +1,30 @@
+
+                  +import os, urllib.request
+
+                  +
+
+                  +token = open(os.environ["KUBEFLOW_TRAINER_SERVER_TOKEN"]).read()
+
+                  +req = urllib.request.Request(url, method="POST")
+
+                  +req.add_header("Authorization", f"Bearer {token}")
+
+                  ```'
+                - "Review the following code diff and identify any issues:\n\nFile:\
+                  \ pkg/webhooks/trainjob_webhook.go\nLanguage: Go\n\n```diff\n@@\
+                  \ -50,6 +50,10 @@\n+func (d *TrainJobDefaulter) Default(ctx context.Context,\
+                  \ trainJob *trainer.TrainJob) error {\n+\tnow := metav1.Now()\n\
+                  +\tfor i := range trainJob.Spec.RuntimePatches {\n+\t\ttrainJob.Spec.RuntimePatches[i].Time\
+                  \ = &now\n+\t}\n```"
+                - "Review the following code diff and identify any issues:\n\nFile:\
+                  \ pkg/util/cert/cert.go\nLanguage: Go\n\n```diff\n@@ -69,6 +69,12\
+                  \ @@\n+func SetupTLSConfig(mgr ctrl.Manager) (*tls.Config, error)\
+                  \ {\n+\tcertWatcher, err := certwatcher.New(certDir+\"/tls.crt\"\
+                  , certDir+\"/tls.key\")\n+\tif err != nil { return nil, err }\n\
+                  +\treturn &tls.Config{\n+\t\tGetCertificate: certWatcher.GetCertificate,\n\
+                  +\t}, nil\n+}\n```"
+                - "Review the following code diff and identify any issues:\n\nFile:\
+                  \ manifests/overlays/manager/kustomization.yaml\nLanguage: YAML\n\
+                  \n```diff\n@@ -3,4 +3,4 @@\n resources:\n   - ../../base/rbac\n\
+                  \   - ../../base/manager\n-  - ../../base/webhook\n+  # - ../../base/webhook\n\
+                  ```"
+                - "Review the following code diff and identify any issues:\n\nFile:\
+                  \ pkg/status/server.go\nLanguage: Go\n\n```diff\n@@ -100,6 +100,10\
+                  \ @@\n+func (s *Server) authorizeRequest(r *http.Request, namespace,\
+                  \ name string) bool {\n+\tpod := &corev1.Pod{}\n+\tif err := s.client.Get(r.Context(),\
+                  \ types.NamespacedName{Namespace: namespace, Name: podName}, pod);\
+                  \ err != nil {\n+\t\treturn false\n+\t}\n```"
+                - "Review the following code diff and identify any issues:\n\nFile:\
+                  \ pkg/runtime/framework/plugins/flux/flux.go\nLanguage: Go\n\n```diff\n\
+                  @@ -402,8 +406,12 @@\n+\tvar tasks int32\n+\tnodes := *trainJob.Spec.Trainer.NumNodes\n\
+                  +\tif trainJob.Spec.Trainer.NumProcPerNode != nil {\n+\t\ttasks\
+                  \ = *trainJob.Spec.Trainer.NumProcPerNode\n+\t}\n+\tflags := fmt.Sprintf(\"\
+                  -N %d -n %d\", nodes, tasks)\n+\trspec := fmt.Sprintf(\"--cores=0-%d\"\
+                  , tasks-1)\n```"
+                - 'Review the following code diff and identify any issues:
+
+
+                  File: manifests/base/webhook/manifests.yaml
+
+                  Language: YAML
+
+
+                  ```diff
+
+                  @@ -0,0 +1,15 @@
+
+                  +apiVersion: admissionregistration.k8s.io/v1
+
+                  +kind: MutatingWebhookConfiguration
+
+                  +metadata:
+
+                  +  name: mutating-webhook-configuration
+
+                  +webhooks:
+
+                  +- clientConfig:
+
+                  +    service:
+
+                  +      name: webhook-service
+
+                  +      namespace: system
+
+                  +      path: /mutate-trainer-kubeflow-org-v1alpha1-trainjob
+
+                  ```'
+                - "Review the following code diff and identify any issues:\n\nFile:\
+                  \ manifests/base/manager/controller_manager_config.yaml\nLanguage:\
+                  \ YAML\n\n```diff\n@@ -5,4 +5,4 @@\n controller:\n   manager:\n\
+                  -    leaderElect: true\n+    leaderElect: false\n   certManagement:\n\
+                  -    enable: true\n+    enable: false\n```"
+                - "Review the following code diff and identify any issues:\n\nFile:\
+                  \ pkg/statusserver/middleware.go\nLanguage: Go\n\n```diff\n@@ -0,0\
+                  \ +1,20 @@\n+func authenticationMiddleware(logger logr.Logger) Middleware\
+                  \ {\n+\treturn func(next http.Handler) http.Handler {\n+\t\treturn\
+                  \ http.HandlerFunc(func(w http.ResponseWriter, r *http.Request)\
+                  \ {\n+\t\t\tauth := r.Header.Get(\"Authorization\")\n+\t\t\tif !strings.HasPrefix(auth,\
+                  \ \"Bearer \") {\n+\t\t\t\thttp.Error(w, \"Invalid Authorization\
+                  \ header format\", http.StatusUnauthorized)\n+\t\t\t\treturn\n+\t\
+                  \t\t}\n+\t\t\ttoken := strings.TrimPrefix(auth, \"Bearer \")\n+\t\
+                  \t\tif token == \"\" {\n+\t\t\t\thttp.Error(w, \"Empty bearer token\"\
+                  , http.StatusUnauthorized)\n+\t\t\t\treturn\n+\t\t\t}\n```"
+                - "Review the following code diff and identify any issues:\n\nFile:\
+                  \ pkg/runtime/framework/plugins/plainml/plainml.go\nLanguage: Go\n\
+                  \n```diff\n@@ -80,6 +80,10 @@\n+\tfor i, patch := range trainJob.Spec.RuntimePatches\
+                  \ {\n+\t\tif i < len(old.Spec.RuntimePatches) && reflect.DeepEqual(patch,\
+                  \ old.Spec.RuntimePatches[i]) {\n+\t\t\ttrainJob.Spec.RuntimePatches[i].Time\
+                  \ = old.Spec.RuntimePatches[i].Time\n+\t\t} else {\n+\t\t\ttrainJob.Spec.RuntimePatches[i].Time\
+                  \ = &now\n+\t\t}\n```"
+                - "Review the following code diff and identify any issues:\n\nFile:\
+                  \ pkg/constants/constants.go\nLanguage: Go\n\n```diff\n@@ -114,4\
+                  \ +114,7 @@\n \tFluxCurveVolumePath = \"/curve\"\n \n+\t// Ensure\
+                  \ MPI has full memory of the host\n+\tFluxMemoryVolumeName = \"\
+                  dshm\"\n```"
+                - "Review the following code diff and identify any issues:\n\nFile:\
+                  \ pkg/runtime/core/trainingruntime.go\nLanguage: Go\n\n```diff\n\
+                  @@ -50,6 +50,15 @@\n+func mergeRuntimePatches(jobSet *jobsetv1.JobSet,\
+                  \ patches []trainer.RuntimePatch) {\n+\tfor _, rJobPatch := range\
+                  \ patches {\n+\t\tfor i, rJob := range jobSet.Spec.ReplicatedJobs\
+                  \ {\n+\t\t\tif rJob.Name == rJobPatch.TargetReplicatedJob {\n+\t\
+                  \t\t\tapplyPodPatch(&jobSet.Spec.ReplicatedJobs[i].Template.Spec.Template,\
+                  \ rJobPatch.Template.PodTemplatePatch)\n+\t\t\t}\n+\t\t}\n+\t}\n\
+                  +}\n```"
+                - "Review the following code diff and identify any issues:\n\nFile:\
+                  \ pkg/features/features.go\nLanguage: Go\n\n```diff\n@@ -30,6 +30,13\
+                  \ @@\n+const (\n+\tTrainJobRuntimeStatus featuregate.Feature = \"\
+                  TrainJobRuntimeStatus\"\n+)\n+\n+var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{\n\
+                  +\tTrainJobRuntimeStatus: {Default: false, PreRelease: featuregate.Alpha},\n\
+                  +}\n```"
+                - 'Review the following code diff and identify any issues:
+
+
+                  File: charts/kubeflow-trainer/values.yaml
+
+                  Language: YAML
+
+
+                  ```diff
+
+                  @@ -138,6 +138,13 @@
+
+                  +    statusServer:
+
+                  +      # -- Port that the TrainJob status server serves on.
+
+                  +      port: 10443
+
+                  +      # -- QPS rate limit for the TrainJob Status Server api client
+
+                  +      qps: 5
+
+                  +      # -- Burst rate limit for the TrainJob Status Server api
+                  client
+
+                  +      burst: 10
+
+                  ```'
+        taskInfo:
+          name: evaluate
+      extract-code-review-gold:
+        cachingOptions: {}
+        componentRef:
+          name: comp-extract-code-review-gold
+        dependentTasks:
+        - resolve-version
+        inputs:
+          parameters:
+            output_s3_path:
+              taskOutputParameter:
+                outputParameterKey: gold_data_path
+                producerTask: resolve-version
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_endpoint:
+              runtimeValue:
+                constant: http://minio.sridharproject.svc.cluster.local:9000
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+            synthetic_bucket:
+              runtimeValue:
+                constant: mlflow-artifacts
+            synthetic_prefix:
+              runtimeValue:
+                constant: synthetic/code-review/
+        taskInfo:
+          name: extract-code-review-gold
+      extract-preferences:
+        cachingOptions: {}
+        componentRef:
+          name: comp-extract-preferences
+        dependentTasks:
+        - deploy-model
+        - resolve-version
+        inputs:
+          parameters:
+            max_supplement_questions:
+              componentInputParameter: max_supplement_questions
+            mlflow_tracking_uri:
+              runtimeValue:
+                constant: http://mlflow.sridharproject.svc.cluster.local:5000
+            model_version:
+              taskOutputParameter:
+                outputParameterKey: version
+                producerTask: resolve-version
+            question_bank_s3_path:
+              runtimeValue:
+                constant: s3://mlflow-artifacts/synthetic/code-review/diff-bank.json
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_endpoint:
+              runtimeValue:
+                constant: http://minio.sridharproject.svc.cluster.local:9000
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+            sft_run_name_prefix:
+              runtimeValue:
+                constant: pipeline-eval-
+            student_url:
+              runtimeValue:
+                constant: http://code-review-llm-predictor.sridharproject.svc.cluster.local:8080
+            teacher_api_key:
+              componentInputParameter: teacher_api_key
+            teacher_api_url:
+              componentInputParameter: teacher_api_url
+            teacher_model:
+              componentInputParameter: teacher_model
+        taskInfo:
+          name: extract-preferences
+      finetune:
+        cachingOptions: {}
+        componentRef:
+          name: comp-finetune
+        dependentTasks:
+        - extract-code-review-gold
+        - resolve-version
+        inputs:
+          parameters:
+            base_model_id:
+              taskOutputParameter:
+                outputParameterKey: prev_model_path
+                producerTask: resolve-version
+            gold_data_path:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: extract-code-review-gold
+            model_output_s3_path:
+              taskOutputParameter:
+                outputParameterKey: model_output_path
+                producerTask: resolve-version
+            num_epochs:
+              componentInputParameter: num_epochs
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_endpoint:
+              runtimeValue:
+                constant: http://minio.sridharproject.svc.cluster.local:9000
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+        taskInfo:
+          name: finetune
+      merge-preferences:
+        cachingOptions: {}
+        componentRef:
+          name: comp-merge-preferences
+        dependentTasks:
+        - collect-human-feedback
+        - extract-preferences
+        inputs:
+          parameters:
+            human_feedback_path:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: collect-human-feedback
+            pipeline_pref_path:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: extract-preferences
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_endpoint:
+              runtimeValue:
+                constant: http://minio.sridharproject.svc.cluster.local:9000
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+        taskInfo:
+          name: merge-preferences
+      resolve-version:
+        cachingOptions: {}
+        componentRef:
+          name: comp-resolve-version
+        inputs:
+          parameters:
+            explicit_version:
+              componentInputParameter: model_version
+            gold_bucket:
+              runtimeValue:
+                constant: mlflow-artifacts
+            hf_base_model_id:
+              runtimeValue:
+                constant: Qwen/Qwen2.5-Coder-1.5B-Instruct
+            model_bucket:
+              runtimeValue:
+                constant: sridhar-models
+            model_prefix:
+              runtimeValue:
+                constant: code-review-1.5b-
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_endpoint:
+              runtimeValue:
+                constant: http://minio.sridharproject.svc.cluster.local:9000
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+        taskInfo:
+          name: resolve-version
+  inputDefinitions:
+    parameters:
+      dpo_beta:
+        defaultValue: 0.1
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      dpo_epochs:
+        defaultValue: 3.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      max_supplement_questions:
+        defaultValue: 50.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      min_dpo_pairs:
+        defaultValue: 3.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      model_version:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      num_epochs:
+        defaultValue: 3.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      s3_access_key:
+        defaultValue: minioadmin
+        isOptional: true
+        parameterType: STRING
+      s3_secret_key:
+        defaultValue: minioadmin123
+        isOptional: true
+        parameterType: STRING
+      teacher_api_key:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      teacher_api_url:
+        defaultValue: http://ollama.sridharproject.svc.cluster.local:11434
+        isOptional: true
+        parameterType: STRING
+      teacher_model:
+        defaultValue: qwen2.5-coder:32b-instruct-q4_K_M
+        isOptional: true
+        parameterType: STRING
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.16.0

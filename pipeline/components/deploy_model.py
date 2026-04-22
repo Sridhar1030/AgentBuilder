@@ -21,6 +21,14 @@ def deploy_model(
     import time
     from kubernetes import client, config
 
+    print("=" * 60)
+    print("DEPLOY MODEL STEP")
+    print("=" * 60)
+    print(f"  ISVC name:    {isvc_name}")
+    print(f"  Namespace:    {namespace}")
+    print(f"  Model path:   {model_s3_path}")
+    print("=" * 60)
+
     config.load_incluster_config()
 
     custom_api = client.CustomObjectsApi()
@@ -37,6 +45,7 @@ def deploy_model(
     patch_body = {
         "spec": {
             "predictor": {
+                "minReplicas": 1,
                 "model": {
                     "storageUri": storage_uri,
                 }
@@ -44,7 +53,7 @@ def deploy_model(
         }
     }
 
-    print(f"Patching {isvc_name} storageUri -> {storage_uri}")
+    print(f"[{time.strftime('%H:%M:%S')}] Patching {isvc_name} storageUri -> {storage_uri}")
     custom_api.patch_namespaced_custom_object(
         group=group,
         version=version,
@@ -54,8 +63,7 @@ def deploy_model(
         body=patch_body,
     )
 
-    # Give the controller time to start the rollout before polling
-    print("Waiting 30s for rollout to begin...")
+    print(f"[{time.strftime('%H:%M:%S')}] Patch applied. Waiting 30s for rollout to begin...")
     time.sleep(30)
 
     # Wait for the ISVC to become Ready with the NEW storageUri (up to 10 min)
@@ -87,16 +95,16 @@ def deploy_model(
 
         if ready and current_uri == storage_uri:
             url = isvc.get("status", {}).get("url", "")
-            print(f"InferenceService {isvc_name} is Ready with new model: {url}")
+            print(f"[{time.strftime('%H:%M:%S')}] ISVC {isvc_name} is Ready: {url}")
             svc_url = f"http://{isvc_name}-predictor.{namespace}.svc.cluster.local:8080"
-
-            # Extra wait for vLLM to finish loading the model into GPU memory
-            print("Waiting 60s for vLLM to fully initialize...")
+            print(f"[{time.strftime('%H:%M:%S')}] Internal URL: {svc_url}")
+            print(f"[{time.strftime('%H:%M:%S')}] Waiting 60s for vLLM to fully load model into GPU...")
             time.sleep(60)
+            print(f"[{time.strftime('%H:%M:%S')}] Deploy complete.")
             return svc_url
 
         status_msg = f"ready={ready}, storageUri matches={current_uri == storage_uri}"
-        print(f"Waiting for {isvc_name}... ({elapsed}s/{timeout}s) [{status_msg}]")
+        print(f"[{time.strftime('%H:%M:%S')}] Waiting for {isvc_name}... ({elapsed}s/{timeout}s) [{status_msg}]")
         time.sleep(poll_interval)
         elapsed += poll_interval
 
