@@ -142,16 +142,21 @@ def finetune(
         gpus_per_node_list = [4, 4]
 
     num_gpus_per_node = min(gpus_per_node_list) if gpus_per_node_list else 4
-    num_workers = max(0, available_gpu_nodes - 1)
-    total_gpus = available_gpu_nodes * num_gpus_per_node
-    print(f"[{time.strftime('%H:%M:%S')}] GPU topology: {available_gpu_nodes} usable nodes x {num_gpus_per_node} GPUs/node = {total_gpus} total")
+
+    # Reserve 1 node as buffer for always-on services (Ollama, etc.)
+    safe_gpu_nodes = max(1, available_gpu_nodes - 1)
+    print(f"[{time.strftime('%H:%M:%S')}] Reserving 1 node buffer -> {safe_gpu_nodes} schedulable nodes")
+
+    num_workers = max(0, safe_gpu_nodes - 1)
+    total_gpus = safe_gpu_nodes * num_gpus_per_node
+    print(f"[{time.strftime('%H:%M:%S')}] GPU topology: {safe_gpu_nodes} usable nodes x {num_gpus_per_node} GPUs/node = {total_gpus} total")
 
     print("=" * 60)
     print("SFT FINE-TUNE STEP (PyTorchJob, multi-node multi-GPU)")
     print("=" * 60)
     print(f"  Job name:     {job_name}")
     print(f"  Image:        {image}")
-    print(f"  Nodes:        1 Master + {num_workers} Workers = {available_gpu_nodes} nodes")
+    print(f"  Nodes:        1 Master + {num_workers} Workers = {safe_gpu_nodes} nodes")
     print(f"  GPUs/node:    {num_gpus_per_node}")
     print(f"  Total GPUs:   {total_gpus}")
     print(f"  Base model:   {base_model_id}")

@@ -1,0 +1,86 @@
+# =============================================================================
+# Distillation Pipeline Configuration
+# =============================================================================
+# Fill out this file and run /distill.prerequisites to bootstrap infrastructure,
+# /distill.setup to validate, then /distill.run to start training.
+#
+# This config drives the ENTIRE pipeline -- no code changes needed.
+# =============================================================================
+
+# -- CLUSTER CONFIG -----------------------------------------------------------
+# Your OpenShift AI environment. Change namespace and credentials to match.
+cluster:
+  namespace: "sridharproject"
+  s3_endpoint: "http://minio.{{namespace}}.svc.cluster.local:9000"
+  s3_access_key: "minioadmin"
+  s3_secret_key: "minioadmin123"
+  mlflow_uri: "http://mlflow.{{namespace}}.svc.cluster.local:5000"
+  mlflow_experiment: "Distillation-Eval"
+  model_bucket: "sridhar-models"
+  data_bucket: "mlflow-artifacts"
+
+# -- TEACHER CONFIG -----------------------------------------------------------
+# The large model that generates training signal for the student.
+# Ollama is deployed by /distill.prerequisites. The model is pulled automatically.
+teacher:
+  api_url: "http://ollama.{{namespace}}.svc.cluster.local:11434"
+  model: "qwen2.5-coder:32b-instruct-q4_K_M"
+  api_key: ""
+  system_prompt: >-
+    You are a senior code reviewer specializing in Go, Python, and Kubernetes.
+    Review the given code diff and identify any issues related to bugs, security,
+    performance, reliability, style, or Kubernetes best practices.
+    If the code is clean, say so.
+    Be concise -- 2-4 sentences max, like a real GitHub PR comment.
+
+# -- STUDENT CONFIG -----------------------------------------------------------
+# The small model being fine-tuned. Must be a HuggingFace model ID.
+student:
+  base_model_id: "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+  model_prefix: "code-review-1.5b-"
+  isvc_name: "code-review-llm"
+
+# -- DOMAIN CONFIG ------------------------------------------------------------
+# What the model is being trained to do. Change this for a new use case.
+domain:
+  name: "code-review"
+  training_data_prefix: "synthetic/code-review/"
+  question_bank_s3: "s3://mlflow-artifacts/synthetic/code-review/diff-bank.json"
+  preference_bank_s3: "preferences/static-bank/preference-bank.jsonl"
+  human_feedback_prefix: "preferences/human-feedback/"
+
+  # How the teacher grades student responses (used in evaluate + baseline_eval)
+  grading_prompt: >-
+    You are grading an AI-generated code review comment. Rate it 1-10.
+    Scoring guide:
+    - 8-10: Correctly identifies the main issue(s) in the diff. Bonus if concise.
+    - 6-7: Identifies the issue but is verbose, vague, or missing minor details.
+    - 4-5: Partially correct -- mentions something relevant but misses the key issue.
+    - 2-3: Mostly wrong, hallucinated issues, or says code is fine when it has real bugs.
+    - 1: Completely irrelevant or nonsensical.
+    If the code is genuinely clean, saying 'LGTM' or 'no issues' is correct and scores 8+.
+    Correctness matters most. A correct but verbose answer is better than a wrong concise one.
+    Respond with ONLY a JSON object: {"score": <number>, "reason": "<brief reason>"}
+
+  # 10-15 curated test prompts for evaluation.
+  # For a new domain, replace these with your own domain-specific test cases.
+  # You can also point to a JSON file: test_questions_file: "domain/test_questions.json"
+  test_questions_file: "pipeline/domain/test_questions.json"
+
+# -- TRAINING CONFIG ----------------------------------------------------------
+# Hyperparameters. Sensible defaults provided -- tune as needed.
+training:
+  sft_epochs: 3
+  dpo_epochs: 1
+  dpo_beta: 0.3
+  min_dpo_pairs: 3
+  max_supplement_questions: 5
+  static_bank_sample_size: 300
+  sft_mix_ratio: 0.15
+
+# -- IMAGES -------------------------------------------------------------------
+# Container images. /distill.prerequisites builds these in-cluster.
+# If you have pre-built images, set them here and skip the build steps.
+images:
+  trainer: "image-registry.openshift-image-registry.svc:5000/{{namespace}}/distillation-trainer:latest"
+  feedback_api: "image-registry.openshift-image-registry.svc:5000/{{namespace}}/feedback-api:latest"

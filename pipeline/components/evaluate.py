@@ -25,6 +25,7 @@ def evaluate(
     s3_endpoint: str = "",
     s3_access_key: str = "",
     s3_secret_key: str = "",
+    grading_prompt: str = "",
 ) -> dict:
     """Send test questions to Student, have Teacher grade responses, log to MLflow."""
     import json
@@ -67,8 +68,9 @@ def evaluate(
     print(f"  MLflow URI:    {mlflow_tracking_uri or '(not set)'}")
     print("=" * 60)
 
-    GRADING_PROMPT = (
-        "You are grading an AI-generated code review comment. Rate it 1-10.Be on the rewarding side of the scale.\n"
+    GRADING_PROMPT = grading_prompt if grading_prompt else (
+        "You are grading an AI-generated code review comment. Rate it 1-10. "
+        "Be on the rewarding side of the scale.\n"
         "Scoring guide:\n"
         "- 8-10: Correctly identifies the main issue(s) in the diff. Bonus if concise.\n"
         "- 6-7: Identifies the issue but is verbose, vague, or missing minor details.\n"
