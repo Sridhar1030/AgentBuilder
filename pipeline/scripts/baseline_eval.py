@@ -65,7 +65,7 @@ else:
 
 GRADING_PROMPT = os.environ.get("GRADING_PROMPT", "") or (
     "You are grading an AI-generated code review comment as it would appear in a "
-    "GitHub Pull Request. Rate it 1-10 based on how useful it would be to a developer , donot rate above 7"
+    "GitHub Pull Request. Rate it 1-10 based on how useful it would be to a developer"
     "reading their PR:\n be harsh and critical. If you think the code is bad, give it a 1."
     "- Correct identification: Does it spot the actual issue in the diff (not a hallucinated one)?\n"
     "- Conciseness: Is it brief and to-the-point, like a real PR comment? "
