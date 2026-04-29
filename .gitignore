@@ -82,3 +82,7 @@ venv311/
 *.jsonl
 mlflow.db
 taskDone.txtextension/
+
+# —— Docs & images ————————————————————————————————————————————————
+docs/
+images/
