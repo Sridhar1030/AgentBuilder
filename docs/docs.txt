@@ -1,121 +1,200 @@
+
 Knowledge Distillation: Making AI Smaller, Smarter, and Cheaper
 Project: LLM-to-SLM Distillation PoC on Red Hat OpenShift AI
-Author: Sridhar Pillai
-Jira: https://redhat.atlassian.net/browse/RHOAIENG-51416
-Github: https://github.com/Sridhar1030/AgentBuilder
-
+Author:Sridhar Pillai
+Jira : https://redhat.atlassian.net/browse/RHOAIENG-51416 
+Github :: https://github.com/Sridhar1030/AgentBuilder 
 The Problem
 Large Language Models (LLMs) like Meta's Llama 3.3 70B are highly capable but expensive to run. They require multiple GPUs, consume significant compute, and are slow to respond. For enterprise use cases where cost and latency matter, serving a 70B model at scale is impractical.
 A Real-World Scenario: Imagine a large healthcare network processing 50,000 patient portal messages daily. If they deploy a massive 70B model to read, categorize, and route these messages to the correct departments (such as billing, pharmacy, or specific clinics), they would need expensive, dedicated GPU clusters to keep this sensitive data securely on-premises. This infrastructure would cost tens of thousands of dollars monthly and introduce unnecessary delays into the triage process. Furthermore, the vast majority of these messages, like prescription refill requests or appointment scheduling, do not require the deep diagnostic reasoning of a massive AI. They simply need fast, secure, and accurate routing.
-The question: Can we transfer the knowledge of a large model into a small 1B model, making it nearly as smart but dramatically cheaper to run?
+The question: Can we transfer the knowledge of a large 70B model into a small 1B model, making it nearly as smart but 70x cheaper to run?
 
 Why Small Language Models Outperform LLMs on Specific Tasks
 Massive LLMs are not always the best tool for the job. For structured tasks like API orchestration, tool calling, or deterministic formatting, highly trained Small Language Models (SLMs) frequently outperform generalist LLMs. By aggressively fine-tuning SLMs for targeted behaviors, they avoid verbose overgeneralization and deliver cleaner outputs, strict schema adherence, and fewer hallucinations.
 This architectural advantage is backed by recent research:
-Small Language Models are the Future of Agentic AI: Concludes that SLMs deliver higher reliability and lower latency for the repetitive, scoped subtasks required in modular agent architectures.
-Small Language Models for Efficient Agentic Tool Calling: Demonstrates that task-specific optimization beats sheer scale. A highly specialized 350M parameter SLM drastically outperformed massive models like ChatGPT and Claude on tool-calling evaluations.
+Small Language Models are the Future of Agentic AI : Concludes that SLMs deliver higher reliability and lower latency for the repetitive, scoped subtasks required in modular agent architectures.
+Small Language Models for Efficient Agentic Tool Calling : Demonstrates that task-specific optimization beats sheer scale. A highly specialized 350M parameter SLM drastically outperformed massive models like ChatGPT and Claude on tool-calling evaluations.
 On-Policy Distillation: Highlights how frameworks like Generalized Knowledge Distillation allow SLMs to learn interactively from teacher feedback rather than static data, creating highly accurate models tailored to specific domains.
 
 
 The Approach: Teacher-Student Distillation
-The idea is simple: a large "Teacher" model teaches a small "Student" model how to answer questions well.
-Teacher: Llama 3.1 8B Instruct (hosted in-cluster via Ollama). Capable enough to guide the Student, fully self-contained with no external API dependencies.
-Student: Llama 3.2 1B (hosted on OpenShift via KServe + vLLM). Small, fast, and cheap, but initially not very smart.
+The idea is simple: a large "Teacher" model teaches a small "Student" model how to answer questions well. The Student is self-improving — it gets smarter every time you run the pipeline, and it gets smarter every time you use it. Each run builds on the previous checkpoint, and every thumbs-down from a user feeds directly into the next training cycle.
+
+Phase 1 — General-Purpose Distillation
+Teacher: Llama 3.3 70B (hosted externally via Groq API). Highly capable, expensive to serve.
+Student: Llama 3.2 1B (hosted on OpenShift via KServe). Small, fast, and cheap, but initially not very smart.
 How it works:
-1. Users ask questions through a Gradio chat interface.
-2. The Teacher answers questions, and these high-quality responses are logged as "gold data."
-3. The Student is fine-tuned on this gold data using SFT (Supervised Fine-Tuning) with QLoRA, the standard approach for distilling instruct models, done memory-efficiently on a single GPU.
-4. The Teacher and Student answer the same questions; where the Teacher scores higher, those pairs become preference data (prompt, chosen answer, rejected answer).
-5. The Student is further refined using DPO (Direct Preference Optimization) — learning to prefer the Teacher's style of answer over its own weaker attempts.
-6. The improved Student is deployed, and the Teacher grades its new answers.
-7. This cycle repeats. Each iteration, the Student gets smarter.
-This is the Distillation Flywheel: a self-improving loop that combines SFT (learn what to say) with DPO (learn how to say it better).
+Users ask questions through a Gradio chat interface.
+The Teacher answers questions, and these high-quality responses are logged as "gold data."
+The Student is fine-tuned on this gold data using SFT (Supervised Fine-Tuning) with QLoRA ,  the standard approach for distilling instruct models, done memory-efficiently on a single GPU
+The improved Student is deployed, and the Teacher grades its new answers.
+This cycle repeats. Each iteration, the Student gets smarter.
+This is the Distillation Flywheel: a self-improving loop where the Teacher continuously trains the Student.
+
+Phase 2 — Domain-Specific Distillation with SFT + DPO
+Phase 1 proved the flywheel works for general Q&A. Phase 2 applies the same idea to a specific domain, demonstrating that the pipeline can produce a specialist SLM for any targeted task.
+To demonstrate this, we used code review as an example domain — training the Student on ~8,300 real GitHub code review samples from the ronantakizawa/github-codereview HuggingFace dataset to review code diffs (Go, Python, Kubernetes YAML) and produce structured, reviewer-quality comments. The domain is interchangeable; the pipeline and workflow are the point, not the specific task.
+
+Key changes from Phase 1:
+Self-hosted Teacher: Replaced the external Groq API with an on-cluster Ollama instance running Qwen2.5-Coder 32B (quantized to 4-bit). The Teacher now runs inside the cluster on a single GPU — no external API dependency.
+Domain-specific Student: Switched to Qwen2.5-Coder 1.5B Instruct as the Student base model, chosen for its strong code understanding at a size that fits on a single T4 GPU (16GB VRAM).
+Iterative fine-tuning: Each pipeline run starts SFT from the previous run's checkpoint (not from the base model). The Student accumulates knowledge across runs — v1 → v2 → v3 → v4 etc.
+DPO (Direct Preference Optimization): Added a second training phase after SFT. The Teacher and Student both answer the same prompts, a grading function scores both, and when the Teacher's answer is meaningfully better, a preference pair is created (Teacher = chosen, Student = rejected). The Student is then trained with DPO to prefer the Teacher's style of answering. DPO teaches judgment, not just format.
+Multi-GPU distributed training: SFT and DPO now run as PyTorchJobs across multiple nodes using torchrun and DDP. The pipeline dynamically discovers available GPU nodes at runtime, checks for free GPU capacity, and scales the training job accordingly — no hardcoded node counts.
+
+The Pipeline (9 Steps)
+The full pipeline runs as a single automated Kubeflow Pipeline on OpenShift AI:
+
+0. Resolve Version — Auto-increments the model version (v1, v2, v3...). Detects the previous run's checkpoint in MinIO for iterative training. If no previous model exists, falls back to the HuggingFace base model.
+1. Extract Gold Data — Pulls pre-built training data (ChatML-formatted JSONL) from MinIO. The dataset includes ~8,300 samples sourced from the ronantakizawa/github-codereview HuggingFace dataset, containing real GitHub code review interactions.
+2. SFT Fine-Tune — Trains the Student on gold data using QLoRA across multiple GPUs (PyTorchJob). Starts from the previous version's checkpoint for iterative improvement.
+3. Deploy SFT Model — Hot-swaps the live Student model via KServe (needed temporarily for the next step).
+4a. Collect Human Feedback — Reads any pending human feedback DPO pairs from MinIO (submitted by developers via the IDE extension) and moves consumed pairs to a "used" prefix so they are never processed twice.
+4b. Extract Preferences — The deployed SFT Student and the Teacher both answer prompts from a question bank. A grading function scores both responses. When the Teacher scores meaningfully higher, a preference pair (chosen/rejected) is created for DPO training.
+4c. Merge Preferences — Combines the automated preference pairs (from 4b) with the human feedback pairs (from 4a) into a single dataset.
+5. DPO Fine-Tune — Refines the SFT model using the merged preference data. Runs as a multi-GPU PyTorchJob, same as SFT.
+6. Deploy Final Model — Deploys the DPO-refined model via KServe, replacing the temporary SFT deployment.
+7. Evaluate — The Teacher grades the final model on a fixed test set. Scores are logged to MLflow for comparison across runs.
+
+Human Feedback Loop
+The pipeline doesn't just learn from automated Teacher-Student comparisons. Developers can directly influence the next training run through a feedback loop built into the IDE:
+
+1. A VS Code extension sends code diffs to the deployed Student model and displays the review.
+2. The developer reads the review and clicks thumbs-up or thumbs-down.
+3. On thumbs-down, the extension calls a Feedback API service running on the cluster.
+4. The Feedback API sends the same diff to the Teacher model, which generates an improved review.
+5. A DPO pair is created (Teacher response = chosen, Student response = rejected) and stored in MinIO under a pending prefix.
+6. On the next pipeline run, the Collect Human Feedback step picks up these pairs and merges them into DPO training.
+
+This creates a direct path from a developer's reaction in the IDE to improved model behavior in the next version. The feedback loop is additive — it supplements the automated preference extraction, it doesn't replace it.
+
+Dynamic GPU Scaling
+Training jobs automatically adapt to the cluster's GPU capacity:
+The pipeline queries the Kubernetes API at runtime to discover GPU nodes.
+It checks each node's allocatable GPUs and subtracts GPUs already in use by other workloads (e.g., the Ollama teacher model).
+Nodes with insufficient free GPUs are skipped.
+The PyTorchJob is configured with the optimal number of master/worker nodes based on what's actually available.
+This means the pipeline works correctly whether the cluster has 2 GPU nodes or 20 — no code changes needed when scaling infrastructure.
 
 What Was Built
 Interactive Chat App
 A Gradio-based web interface where users can talk to either the Teacher or the Student. When the Student answers, the Teacher automatically grades the response (1-10 score). All interactions are tracked in MLflow.
-
-Automated 7-Step Pipeline (SFT + DPO)
-The entire distillation cycle runs as a single automated pipeline on OpenShift AI:
-1. Resolve Version: Auto-numbers each training cycle (v30, v31, v32...).
-2. Extract Gold Data: Merges Teacher interactions from MinIO with 827 Kubeflow-specific synthetic Q&A pairs into training JSONL.
-3. SFT Fine-Tune: Trains the Student on gold data using QLoRA on a single T4 GPU via Kubeflow TrainJob CRD.
-4. Extract Preferences: Both Student and Teacher answer the same questions; where the Teacher scores higher, those become preference pairs (prompt, chosen, rejected).
-5. DPO Fine-Tune: Refines the SFT model using DPOTrainer on preference pairs, teaching it to prefer better answers over its own weaker attempts.
-6. Deploy: Hot-swaps the live Student model on KServe with zero downtime.
-7. Evaluate: Benchmarks the Student against the Teacher on 15 domain questions (Kubeflow Pipelines, Training Operator, KServe, Katib, multi-tenancy), logs comparison metrics to MLflow.
-
+VS Code Extension
+A VS Code extension that sends code diffs to the deployed Student model for review. Includes thumbs-up/down feedback buttons that feed into the DPO training loop. Works with any OpenAI-compatible endpoint (KServe, Ollama, vLLM, llama.cpp).
+Feedback API Service
+A FastAPI service deployed on OpenShift that receives negative feedback from the VS Code extension, calls the Teacher model for an improved response, and stores the resulting DPO pair in MinIO for the next pipeline run.
+Automated Pipeline
+The entire distillation cycle runs as a single automated pipeline on OpenShift AI (see "The Pipeline" section above).
 Kubernetes Operator
 A custom operator that makes triggering the pipeline as simple as applying a YAML file:
 oc apply -f distillationjob.yaml (Pipeline runs automatically)
 No manual intervention is needed. The operator watches for requests, triggers the pipeline, and reports the status back.
 
 Components Used
-Component                              | Role
-Red Hat OpenShift AI                    | Platform for all ML workloads
-KServe + vLLM                          | Serves the Student model (Llama 3.2 1B) as a high-performance REST API
-Ollama (in-cluster)                    | Hosts the Teacher model (Llama 3.1 8B Instruct) on-cluster — no external API dependencies
-MinIO                                  | On-cluster S3-compatible storage for models, training data, and preference pairs
-MLflow                                 | Experiment tracking: logs every interaction, grade, and benchmark result
-Data Science Pipelines (KFP v2)        | Orchestrates the 7-step SFT+DPO distillation pipeline
-SFT + QLoRA                            | Supervised Fine-Tuning with 4-bit quantized LoRA — learns from gold Q&A data
-DPO (Direct Preference Optimization)   | Aligns model output by learning from Teacher vs Student preference pairs
-Kubeflow Training Operator v2          | Manages GPU training jobs via TrainJob CRD (trainer.kubeflow.org/v1alpha1)
-Custom Kubernetes Operator             | One-click pipeline triggering via DistillationJob CRD
-Gradio                                 | Chat UI for interacting with Teacher and Student models
-
-Hardware: AWS g4dn.12xlarge — 4× NVIDIA Tesla T4 GPUs (15 GB VRAM each)
+Component
+Role
+Red Hat OpenShift AI
+Platform for all ML workloads
+KServe
+Serves the Student model as a REST API
+vLLM
+High-performance inference engine for the Student
+Ollama
+Hosts the Teacher model on-cluster (Qwen2.5-Coder 32B, GPU-accelerated)
+Groq API
+Hosted the 70B Teacher externally (Phase 1 only)
+MinIO
+On-cluster object storage for models, training data, and feedback pairs
+MLflow
+Experiment tracking: logs every interaction, grade, and training metric
+Data Science Pipelines (KFP)
+Orchestrates the pipeline
+SFT + QLoRA
+Supervised Fine-Tuning with quantized LoRA for memory-efficient training
+DPO (Direct Preference Optimization)
+Alignment training using preference pairs (chosen vs rejected responses)
+PyTorchJob + torchrun
+Distributed multi-GPU training across nodes via Kubeflow Training Operator
+Kubeflow Trainer
+Manages GPU training jobs on-cluster
+Custom Kubernetes Operator
+One-click pipeline triggering via YAML
+FastAPI (Feedback Service)
+Receives developer feedback from the IDE and creates DPO training pairs
+VS Code Extension
+Developer-facing interface for code review and feedback collection
 
 
 Benchmark Results
+The pipeline's evaluate step benchmarks the Student against the Teacher on 5 AI/ML domain questions. Results from the latest completed run captured in Mlflow:
 
-Phase 1 Baseline — SFT Only (v21)
-Metric              | Score
-Student Average     | 5.4/10
-Teacher Average     | 9.8/10
-Score Gap           | 4.4
-The Student handled general topics well but failed on specialized concepts it hadn't seen enough training data for.
 
-Phase 2 — SFT + DPO (v32)
-After adding 827 Kubeflow-specific synthetic Q&A pairs, preference extraction, and DPO fine-tuning:
-Metric              | Score
-Student Average     | 8.13/10
-Teacher Average     | 9.0/10
-Score Gap           | 0.87
+What this tells us: The Student already handles general topics well (Q1, Q4) but fails on specialized concepts it hasn't seen enough training data for (QLoRA, teacher-student dynamics). With targeted synthetic data on these weak spots and additional pipeline cycles, the score gap is expected to shrink significantly — demonstrating the flywheel effect.
 
-Improvement: Student score jumped from 5.4 → 8.13 (+51%), and the gap with the Teacher shrank from 4.4 → 0.87 — demonstrating the flywheel effect. The combination of domain-specific SFT data and DPO alignment brought the 1B Student within striking distance of the 8B Teacher across Kubeflow Pipelines, Training Operator, KServe, Katib, and platform questions.
+
 
 
 Key Results
-- End-to-end SFT+DPO pipeline: From raw training data to a deployed, DPO-aligned Student model in a single automated 7-step run.
-- Student score: 5.4 → 8.13: The distillation flywheel closed the quality gap from 4.4 to 0.87 points, demonstrating meaningful knowledge transfer from Teacher to Student.
-- Fully self-contained: Teacher model (Ollama 8B) runs in-cluster alongside the Student, with no external API dependencies.
-- Two-stage training: SFT teaches the Student what to say; DPO teaches it to prefer better answers, combining both for stronger alignment.
-- Auto-versioning: Each training cycle produces a versioned model (v30, v31, v32...), enabling rollback.
-- Hot-swap deployment: The live Student model is updated on KServe without downtime.
-- Teacher-as-Judge evaluation: Automated quality scoring after every training cycle, with per-question breakdowns logged to MLflow.
+
+
+End-to-end automation: From raw Teacher interactions to a deployed, improved Student model in a single pipeline run.
+	
+Auto-versioning: Each training cycle produces a versioned model, enabling rollback.
+
+
+Hot-swap deployment: The live Student model is updated without downtime.
+
+Teacher-as-Judge evaluation: Automated quality scoring after every training cycle.
 	Before fine tuning (Notice the output and the score)
-	After fine tuning (Notice the output and the score)
-- Real-time grading: Every student interaction in the Gradio UI is graded by the Teacher, with scores logged as MLflow Assessments (LLM-as-Judge) and chartable run metrics.
-- Kubernetes-native: Everything runs on OpenShift, triggered by standard oc apply commands via a custom Kubernetes operator.
+                 After fine tuning (Notice the output and the score)
+
+Kubernetes-native: Everything runs on OpenShift, triggered by standard oc apply commands.
+
+Real-time grading — Every student interaction in the Gradio UI is graded by the Teacher, with scores logged as MLflow Assessments (LLM-as-Judge) and chartable run metrics
+
+Iterative improvement — Each pipeline run builds on the previous model checkpoint. SFT loss drops consistently across runs, demonstrating cumulative learning.
+
+Human-in-the-loop DPO — Developer feedback from the VS Code extension directly influences the next training run, creating a closed loop between production usage and model improvement.
+
+Dynamic scaling — Training jobs automatically discover and use all available GPUs in the cluster, scaling from a single node to dozens without code changes.
 
 
 The Flywheel in One Picture
 
-Each cycle, the 1B Student closes the gap with the 8B Teacher, delivering better answers at a fraction of the cost.
+```mermaid
+graph TD
+    A[Gold Data in MinIO] -->|Step 1: Extract| B[SFT Fine-Tune]
+    P[Previous Model Checkpoint] -->|Iterative| B
+    B -->|Step 2| C[Deploy SFT Student via KServe]
+    C -->|Step 4b| D[Extract Preferences\nTeacher vs Student]
+    T[Teacher LLM\nQwen 32B on Ollama] -->|Grades both| D
+    D --> F[Merge Preferences]
+    H[Collect Human Feedback\nfrom MinIO] --> F
+    F -->|Step 5| G[DPO Fine-Tune]
+    G -->|Step 6| I[Deploy Final Model via KServe]
+    I -->|Step 7| J[Evaluate\nTeacher grades Student]
+    J -->|Metrics| K[MLflow]
+    I --> L[VS Code Extension\nReviews Code Diffs]
+    L -->|Thumbs Down| M[Feedback API]
+    M -->|Teacher generates\nimproved review| N[DPO Pair stored in MinIO]
+    N -->|Next Run| H
+    J -->|Next Run| P2[New Checkpoint becomes\nPrevious Model]
+    P2 -->|Cycle Repeats| B
 
+    style A fill:#4a9eff,color:#fff
+    style T fill:#ff6b6b,color:#fff
+    style L fill:#51cf66,color:#fff
+    style M fill:#ffd43b,color:#000
+    style K fill:#845ef7,color:#fff
+    style I fill:#20c997,color:#fff
+```
+
+Each cycle, the Student closes the gap with the Teacher, delivering better answers at a fraction of the cost. With DPO and human feedback, the Student doesn't just learn what to say — it learns which answers developers actually prefer.
 
 Remaining Challenges / Problems
-
-Solved in Phase 2:
-- Teacher dependency — SOLVED. The Teacher now runs in-cluster via Ollama (Llama 3.1 8B). No external API dependencies.
-- Limited training data — SOLVED. 827 Kubeflow-specific synthetic Q&A pairs now provide domain coverage. Student score improved from 5.4 to 8.13.
-- Single training method — SOLVED. Pipeline now combines SFT (learn from gold data) and DPO (learn from preference pairs) for stronger alignment.
-
-Still Open:
-- No automated quality gate — The pipeline deploys every fine-tuned model regardless of evaluation scores. A quality threshold should block deployment if the new model scores worse than the previous version.
-- Canary deployment and rollback — Today the pipeline does a full model swap. A safer approach would split traffic (e.g. 80/20 old/new), compare performance, and only roll forward when the new model proves better.
-- Evaluation depth — The Teacher-as-Judge approach gives a single 1-10 score. More rigorous evaluation (factual accuracy, hallucination detection, domain-specific benchmarks) would provide stronger confidence in model quality.
-- Cost tracking — There is no visibility into the cost per training cycle (GPU hours, storage). Adding cost metrics would help determine when the distillation ROI plateaus.
-- Multi-domain generalization — The Student is currently specialized on Kubeflow. Extending to additional enterprise domains (product docs, customer support) would demonstrate broader applicability.
-- Iterative flywheel demonstration — Running multiple consecutive pipeline cycles and charting score_gap across versions (v32 → v33 → v34) would demonstrate the flywheel effect more visibly.
+Training data diversity — The gold dataset is currently static (~8,300 samples). As the Student improves, it saturates on repeated data. Expanding the dataset with more diverse examples and real-world samples is needed to continue improving.
+Evaluation depth — The Teacher-as-Judge approach gives a single 1-10 score. More rigorous evaluation (factual accuracy, hallucination detection, domain-specific benchmarks) would provide stronger confidence in model quality.
+No automated quality gate — The pipeline deploys every fine-tuned model regardless of evaluation scores. A quality threshold should block deployment if the new model scores worse than the previous version.
+Canary deployment and rollback — Today the pipeline does a full model swap. A safer approach would split traffic (e.g. 80/20 old/new), compare performance, and only roll forward when the new model proves better.
+Cost tracking — There is no visibility into the cost per training cycle (GPU hours, API calls, storage). Adding cost metrics would help determine when the distillation ROI plateaus.
+Feedback volume — The human feedback loop is functional but requires a meaningful volume of thumbs-down signals to measurably shift DPO training. In a small team, this accumulates slowly.

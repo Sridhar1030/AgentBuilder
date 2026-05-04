@@ -175,11 +175,17 @@ def dpo_finetune(
     num_gpus_per_node = min(gpus_per_node_list) if gpus_per_node_list else 4
     print(f"[{time.strftime('%H:%M:%S')}] GPU topology: {available_gpu_nodes} usable nodes x {num_gpus_per_node} GPUs/node")
 
+    # Reserve 1 node as buffer for always-on services (Ollama, etc.)
+    # Without this, the job may request all nodes and one worker gets stuck
+    # Pending because a partially-used node can't fit a full 4-GPU request.
+    safe_gpu_nodes = max(1, available_gpu_nodes - 1)
+    print(f"[{time.strftime('%H:%M:%S')}] Reserving 1 node buffer -> {safe_gpu_nodes} schedulable nodes")
+
     # --- Cap by dataset size: need >= 6 samples per GPU for meaningful DPO ---
     min_samples_per_gpu = 6
     max_data_nodes = max(1, num_pref_pairs // (min_samples_per_gpu * num_gpus_per_node))
 
-    num_total_nodes = min(max_data_nodes, available_gpu_nodes)
+    num_total_nodes = min(max_data_nodes, safe_gpu_nodes)
     num_workers = max(0, num_total_nodes - 1)
     total_gpus = num_total_nodes * num_gpus_per_node
     print(f"[{time.strftime('%H:%M:%S')}] Auto-scaled DPO: {num_pref_pairs} pairs -> {num_total_nodes} nodes ({num_workers} workers) x {num_gpus_per_node} GPUs = {total_gpus} GPUs")

@@ -24,21 +24,28 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.stdout.reconfigure(line_buffering=True)
 
-# ── Config ───────────────────────────────────────────────────────────────
-MODEL_ID = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
-TEACHER_URL = "http://ollama.sridharproject.svc.cluster.local:11434/v1/chat/completions"
-TEACHER_MODEL = "qwen2.5-coder:32b-instruct-q4_K_M"
-MLFLOW_URI = "http://mlflow.sridharproject.svc.cluster.local:5000"
-S3_ENDPOINT = "http://minio.sridharproject.svc.cluster.local:9000"
+# ── Config (override via env vars for domain portability) ─────────────────
+MODEL_ID = os.environ.get("BASE_MODEL_ID", "Qwen/Qwen2.5-Coder-1.5B-Instruct")
+TEACHER_URL = os.environ.get("TEACHER_URL", "http://ollama.sridharproject.svc.cluster.local:11434/v1/chat/completions")
+TEACHER_MODEL = os.environ.get("TEACHER_MODEL", "qwen2.5-coder:32b-instruct-q4_K_M")
+MLFLOW_URI = os.environ.get("MLFLOW_URI", "http://mlflow.sridharproject.svc.cluster.local:5000")
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "http://minio.sridharproject.svc.cluster.local:9000")
 S3_KEY = os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin")
 S3_SECRET = os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin123")
-BASELINE_BUCKET = "mlflow-artifacts"
-BASELINE_S3_KEY = "baseline/scores.json"
-MODEL_BUCKET = "sridhar-models"
-BASE_MODEL_S3_PREFIX = "code-review-1.5b-base/"
+BASELINE_BUCKET = os.environ.get("BASELINE_BUCKET", "mlflow-artifacts")
+BASELINE_S3_KEY = os.environ.get("BASELINE_S3_KEY", "baseline/scores.json")
+MODEL_BUCKET = os.environ.get("MODEL_BUCKET", "sridhar-models")
+BASE_MODEL_S3_PREFIX = os.environ.get("BASE_MODEL_S3_PREFIX", "code-review-1.5b-base/")
 
-# ── 15 curated test diffs (same as pipeline evaluate step) ───────────────
-TEST_QUESTIONS = [
+# ── Test questions: load from file if TEST_QUESTIONS_FILE env is set ──────
+_tq_file = os.environ.get("TEST_QUESTIONS_FILE", "")
+if _tq_file and os.path.exists(_tq_file):
+    with open(_tq_file) as _f:
+        _tq_data = json.load(_f)
+    TEST_QUESTIONS = [item["question"] if isinstance(item, dict) else item for item in _tq_data]
+    print(f"Loaded {len(TEST_QUESTIONS)} test questions from {_tq_file}")
+else:
+    TEST_QUESTIONS = [
     "Review the following code diff and identify any issues:\n\nFile: pkg/controller/job_controller.go\nLanguage: Go\n\n```diff\n@@ -189,7 +189,7 @@\n func (p *Progress) buildProgressServerCaCrtConfigMap(ctx context.Context, trainJob *trainer.TrainJob) (*corev1ac.ConfigMapApplyConfiguration, error) {\n \tsecret := &corev1.Secret{}\n \tif err := p.client.Get(ctx, secretKey, secret); err == nil {\n \t\tif _, ok := secret.Data[\"ca.crt\"]; !ok {\n-\t\t\treturn nil, fmt.Errorf(\"ca.crt not found: %w\", err)\n+\t\t\treturn nil, fmt.Errorf(\"ca.crt not found in TLS secret\")\n \t\t}\n```",
     "Review the following code diff and identify any issues:\n\nFile: test/e2e/testdata/status_update.py\nLanguage: Python\n\n```diff\n@@ -0,0 +1,30 @@\n+import os, urllib.request\n+\n+token = open(os.environ[\"KUBEFLOW_TRAINER_SERVER_TOKEN\"]).read()\n+req = urllib.request.Request(url, method=\"POST\")\n+req.add_header(\"Authorization\", f\"Bearer {token}\")\n```",
     "Review the following code diff and identify any issues:\n\nFile: pkg/webhooks/trainjob_webhook.go\nLanguage: Go\n\n```diff\n@@ -50,6 +50,10 @@\n+func (d *TrainJobDefaulter) Default(ctx context.Context, trainJob *trainer.TrainJob) error {\n+\tnow := metav1.Now()\n+\tfor i := range trainJob.Spec.RuntimePatches {\n+\t\ttrainJob.Spec.RuntimePatches[i].Time = &now\n+\t}\n```",
@@ -54,11 +61,11 @@ TEST_QUESTIONS = [
     "Review the following code diff and identify any issues:\n\nFile: pkg/runtime/core/trainingruntime.go\nLanguage: Go\n\n```diff\n@@ -50,6 +50,15 @@\n+func mergeRuntimePatches(jobSet *jobsetv1.JobSet, patches []trainer.RuntimePatch) {\n+\tfor _, rJobPatch := range patches {\n+\t\tfor i, rJob := range jobSet.Spec.ReplicatedJobs {\n+\t\t\tif rJob.Name == rJobPatch.TargetReplicatedJob {\n+\t\t\t\tapplyPodPatch(&jobSet.Spec.ReplicatedJobs[i].Template.Spec.Template, rJobPatch.Template.PodTemplatePatch)\n+\t\t\t}\n+\t\t}\n+\t}\n+}\n```",
     "Review the following code diff and identify any issues:\n\nFile: pkg/features/features.go\nLanguage: Go\n\n```diff\n@@ -30,6 +30,13 @@\n+const (\n+\tTrainJobRuntimeStatus featuregate.Feature = \"TrainJobRuntimeStatus\"\n+)\n+\n+var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{\n+\tTrainJobRuntimeStatus: {Default: false, PreRelease: featuregate.Alpha},\n+}\n```",
     "Review the following code diff and identify any issues:\n\nFile: charts/kubeflow-trainer/values.yaml\nLanguage: YAML\n\n```diff\n@@ -138,6 +138,13 @@\n+    statusServer:\n+      # -- Port that the TrainJob status server serves on.\n+      port: 10443\n+      # -- QPS rate limit for the TrainJob Status Server api client\n+      qps: 5\n+      # -- Burst rate limit for the TrainJob Status Server api client\n+      burst: 10\n```",
-]
+    ]
 
-GRADING_PROMPT = (
+GRADING_PROMPT = os.environ.get("GRADING_PROMPT", "") or (
     "You are grading an AI-generated code review comment as it would appear in a "
-    "GitHub Pull Request. Rate it 1-10 based on how useful it would be to a developer , donot rate above 7"
+    "GitHub Pull Request. Rate it 1-10 based on how useful it would be to a developer"
     "reading their PR:\n be harsh and critical. If you think the code is bad, give it a 1."
     "- Correct identification: Does it spot the actual issue in the diff (not a hallucinated one)?\n"
     "- Conciseness: Is it brief and to-the-point, like a real PR comment? "

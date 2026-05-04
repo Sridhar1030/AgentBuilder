@@ -112,6 +112,10 @@ components:
     executorLabel: exec-evaluate
     inputDefinitions:
       parameters:
+        grading_prompt:
+          defaultValue: ''
+          isOptional: true
+          parameterType: STRING
         mlflow_tracking_uri:
           defaultValue: ''
           isOptional: true
@@ -650,26 +654,32 @@ deploymentSpec:
           \ = 2\n        gpus_per_node_list = [4, 4]\n\n    num_gpus_per_node = min(gpus_per_node_list)\
           \ if gpus_per_node_list else 4\n    print(f\"[{time.strftime('%H:%M:%S')}]\
           \ GPU topology: {available_gpu_nodes} usable nodes x {num_gpus_per_node}\
-          \ GPUs/node\")\n\n    # --- Cap by dataset size: need >= 6 samples per GPU\
-          \ for meaningful DPO ---\n    min_samples_per_gpu = 6\n    max_data_nodes\
-          \ = max(1, num_pref_pairs // (min_samples_per_gpu * num_gpus_per_node))\n\
-          \n    num_total_nodes = min(max_data_nodes, available_gpu_nodes)\n    num_workers\
-          \ = max(0, num_total_nodes - 1)\n    total_gpus = num_total_nodes * num_gpus_per_node\n\
-          \    print(f\"[{time.strftime('%H:%M:%S')}] Auto-scaled DPO: {num_pref_pairs}\
-          \ pairs -> {num_total_nodes} nodes ({num_workers} workers) x {num_gpus_per_node}\
-          \ GPUs = {total_gpus} GPUs\")\n\n    env_list = [\n        {\"name\": \"\
-          TRAINING_MODE\", \"value\": \"dpo\"},\n        {\"name\": \"PREF_DATA_PATH\"\
-          , \"value\": pref_data_s3_path},\n        {\"name\": \"BASE_MODEL_ID\",\
-          \ \"value\": sft_model_s3_path},\n        {\"name\": \"MODEL_OUTPUT_S3_PATH\"\
-          , \"value\": model_output_s3_path},\n        {\"name\": \"NUM_EPOCHS\",\
-          \ \"value\": str(num_epochs)},\n        {\"name\": \"BATCH_SIZE\", \"value\"\
-          : str(batch_size)},\n        {\"name\": \"LEARNING_RATE\", \"value\": str(learning_rate)},\n\
-          \        {\"name\": \"LORA_R\", \"value\": str(lora_r)},\n        {\"name\"\
-          : \"LORA_ALPHA\", \"value\": str(lora_alpha)},\n        {\"name\": \"DPO_BETA\"\
-          , \"value\": str(dpo_beta)},\n        {\"name\": \"S3_ENDPOINT\", \"value\"\
-          : s3_endpoint},\n        {\"name\": \"S3_ACCESS_KEY\", \"value\": s3_access_key},\n\
-          \        {\"name\": \"S3_SECRET_KEY\", \"value\": s3_secret_key},\n    ]\n\
-          \n    container_spec = {\n        \"name\": \"pytorch\",\n        \"image\"\
+          \ GPUs/node\")\n\n    # Reserve 1 node as buffer for always-on services\
+          \ (Ollama, etc.)\n    # Without this, the job may request all nodes and\
+          \ one worker gets stuck\n    # Pending because a partially-used node can't\
+          \ fit a full 4-GPU request.\n    safe_gpu_nodes = max(1, available_gpu_nodes\
+          \ - 1)\n    print(f\"[{time.strftime('%H:%M:%S')}] Reserving 1 node buffer\
+          \ -> {safe_gpu_nodes} schedulable nodes\")\n\n    # --- Cap by dataset size:\
+          \ need >= 6 samples per GPU for meaningful DPO ---\n    min_samples_per_gpu\
+          \ = 6\n    max_data_nodes = max(1, num_pref_pairs // (min_samples_per_gpu\
+          \ * num_gpus_per_node))\n\n    num_total_nodes = min(max_data_nodes, safe_gpu_nodes)\n\
+          \    num_workers = max(0, num_total_nodes - 1)\n    total_gpus = num_total_nodes\
+          \ * num_gpus_per_node\n    print(f\"[{time.strftime('%H:%M:%S')}] Auto-scaled\
+          \ DPO: {num_pref_pairs} pairs -> {num_total_nodes} nodes ({num_workers}\
+          \ workers) x {num_gpus_per_node} GPUs = {total_gpus} GPUs\")\n\n    env_list\
+          \ = [\n        {\"name\": \"TRAINING_MODE\", \"value\": \"dpo\"},\n    \
+          \    {\"name\": \"PREF_DATA_PATH\", \"value\": pref_data_s3_path},\n   \
+          \     {\"name\": \"BASE_MODEL_ID\", \"value\": sft_model_s3_path},\n   \
+          \     {\"name\": \"MODEL_OUTPUT_S3_PATH\", \"value\": model_output_s3_path},\n\
+          \        {\"name\": \"NUM_EPOCHS\", \"value\": str(num_epochs)},\n     \
+          \   {\"name\": \"BATCH_SIZE\", \"value\": str(batch_size)},\n        {\"\
+          name\": \"LEARNING_RATE\", \"value\": str(learning_rate)},\n        {\"\
+          name\": \"LORA_R\", \"value\": str(lora_r)},\n        {\"name\": \"LORA_ALPHA\"\
+          , \"value\": str(lora_alpha)},\n        {\"name\": \"DPO_BETA\", \"value\"\
+          : str(dpo_beta)},\n        {\"name\": \"S3_ENDPOINT\", \"value\": s3_endpoint},\n\
+          \        {\"name\": \"S3_ACCESS_KEY\", \"value\": s3_access_key},\n    \
+          \    {\"name\": \"S3_SECRET_KEY\", \"value\": s3_secret_key},\n    ]\n\n\
+          \    container_spec = {\n        \"name\": \"pytorch\",\n        \"image\"\
           : image,\n        \"env\": env_list,\n        \"resources\": {\n       \
           \     \"requests\": {\n                \"nvidia.com/gpu\": str(num_gpus_per_node),\n\
           \                \"memory\": \"48Gi\",\n                \"cpu\": \"8\",\n\
@@ -803,11 +813,11 @@ deploymentSpec:
           \    teacher_model: str,\n    teacher_api_key: str,\n    test_questions:\
           \ list,\n    mlflow_tracking_uri: str = \"\",\n    model_version: str =\
           \ \"unknown\",\n    s3_endpoint: str = \"\",\n    s3_access_key: str = \"\
-          \",\n    s3_secret_key: str = \"\",\n) -> dict:\n    \"\"\"Send test questions\
-          \ to Student, have Teacher grade responses, log to MLflow.\"\"\"\n    import\
-          \ json\n    import os\n    import sys\n    import time\n    import requests\n\
-          \    import mlflow\n\n    sys.stdout.reconfigure(line_buffering=True)\n\n\
-          \    if mlflow_tracking_uri.startswith(\"https://\"):\n        os.environ.setdefault(\"\
+          \",\n    s3_secret_key: str = \"\",\n    grading_prompt: str = \"\",\n)\
+          \ -> dict:\n    \"\"\"Send test questions to Student, have Teacher grade\
+          \ responses, log to MLflow.\"\"\"\n    import json\n    import os\n    import\
+          \ sys\n    import time\n    import requests\n    import mlflow\n\n    sys.stdout.reconfigure(line_buffering=True)\n\
+          \n    if mlflow_tracking_uri.startswith(\"https://\"):\n        os.environ.setdefault(\"\
           MLFLOW_TRACKING_INSECURE_TLS\", \"true\")\n\n    if s3_endpoint:\n     \
           \   os.environ.setdefault(\"MLFLOW_S3_ENDPOINT_URL\", s3_endpoint)\n   \
           \     if s3_endpoint.startswith(\"https://\"):\n            os.environ.setdefault(\"\
@@ -823,51 +833,52 @@ deploymentSpec:
           \  Teacher API:   {api_url}\")\n    print(f\"  Teacher model: {teacher_model}\"\
           )\n    print(f\"  Model version: {model_version}\")\n    print(f\"  Questions:\
           \     {len(test_questions)}\")\n    print(f\"  MLflow URI:    {mlflow_tracking_uri\
-          \ or '(not set)'}\")\n    print(\"=\" * 60)\n\n    GRADING_PROMPT = (\n\
-          \        \"You are grading an AI-generated code review comment. Rate it\
-          \ 1-10.Be on the rewarding side of the scale.\\n\"\n        \"Scoring guide:\\\
-          n\"\n        \"- 8-10: Correctly identifies the main issue(s) in the diff.\
-          \ Bonus if concise.\\n\"\n        \"- 6-7: Identifies the issue but is verbose,\
-          \ vague, or missing minor details.\\n\"\n        \"- 4-5: Partially correct\
-          \ -- mentions something relevant but misses the key issue.\\n\"\n      \
-          \  \"- 2-3: Mostly wrong, hallucinated issues, or says code is fine when\
-          \ it has real bugs.\\n\"\n        \"- 1: Completely irrelevant or nonsensical.\\\
-          n\"\n        \"If the code is genuinely clean, saying 'LGTM' or 'no issues'\
-          \ is correct and scores 8+.\\n\"\n        \"Correctness matters most. A\
-          \ correct but verbose answer is better than a wrong concise one.\\n\"\n\
-          \        'Respond with ONLY a JSON object: {\"score\": <number>, \"reason\"\
-          : \"<brief reason>\"}'\n    )\n\n    def query_student(question: str, max_retries:\
-          \ int = 10) -> str:\n        for attempt in range(max_retries):\n      \
-          \      try:\n                resp = requests.post(\n                   \
-          \ f\"{student_url}/v1/chat/completions\",\n                    json={\n\
-          \                        \"model\": \"/mnt/models\",\n                 \
-          \       \"messages\": [{\"role\": \"user\", \"content\": question}],\n \
-          \                       \"max_tokens\": 256,\n                        \"\
-          temperature\": 0.3,\n                    },\n                    timeout=120,\n\
-          \                )\n                if resp.status_code in (400, 404, 503):\n\
-          \                    wait = min(20 * (attempt + 1), 120)\n             \
-          \       print(f\"  [{attempt+1}/{max_retries}] HTTP {resp.status_code},\
-          \ vLLM not ready. Retry in {wait}s\")\n                    time.sleep(wait)\n\
-          \                    continue\n                if not resp.ok:\n       \
-          \             print(f\"  HTTP {resp.status_code} from student: {resp.text[:500]}\"\
-          )\n                resp.raise_for_status()\n                return resp.json()[\"\
-          choices\"][0][\"message\"][\"content\"]\n            except (requests.ConnectionError,\
-          \ requests.Timeout) as e:\n                wait = min(20 * (attempt + 1),\
-          \ 120)\n                print(f\"  [{attempt+1}/{max_retries}] Connection\
-          \ error, retry in {wait}s: {e}\")\n                time.sleep(wait)\n  \
-          \      raise RuntimeError(f\"Student unreachable after {max_retries} retries\"\
-          )\n\n    def _teacher_call(messages: list, max_tokens: int = 512, temperature:\
-          \ float = 0.7) -> str:\n        \"\"\"Call teacher LLM API with exponential\
-          \ backoff on 429/5xx errors.\"\"\"\n        last_error = None\n        for\
-          \ attempt in range(8):\n            try:\n                resp = requests.post(\n\
-          \                    api_url,\n                    headers=api_headers,\n\
-          \                    json={\n                        \"model\": teacher_model,\n\
-          \                        \"messages\": messages,\n                     \
-          \   \"max_tokens\": max_tokens,\n                        \"temperature\"\
-          : temperature,\n                    },\n                    timeout=600,\n\
-          \                )\n                if resp.status_code == 429 or resp.status_code\
-          \ >= 500:\n                    wait = min(2 ** attempt * 5, 120)\n     \
-          \               print(f\"  [{resp.status_code}] Server error, waiting {wait}s\
+          \ or '(not set)'}\")\n    print(\"=\" * 60)\n\n    GRADING_PROMPT = grading_prompt\
+          \ if grading_prompt else (\n        \"You are grading an AI-generated code\
+          \ review comment. Rate it 1-10. \"\n        \"Be on the rewarding side of\
+          \ the scale.\\n\"\n        \"Scoring guide:\\n\"\n        \"- 8-10: Correctly\
+          \ identifies the main issue(s) in the diff. Bonus if concise.\\n\"\n   \
+          \     \"- 6-7: Identifies the issue but is verbose, vague, or missing minor\
+          \ details.\\n\"\n        \"- 4-5: Partially correct -- mentions something\
+          \ relevant but misses the key issue.\\n\"\n        \"- 2-3: Mostly wrong,\
+          \ hallucinated issues, or says code is fine when it has real bugs.\\n\"\n\
+          \        \"- 1: Completely irrelevant or nonsensical.\\n\"\n        \"If\
+          \ the code is genuinely clean, saying 'LGTM' or 'no issues' is correct and\
+          \ scores 8+.\\n\"\n        \"Correctness matters most. A correct but verbose\
+          \ answer is better than a wrong concise one.\\n\"\n        'Respond with\
+          \ ONLY a JSON object: {\"score\": <number>, \"reason\": \"<brief reason>\"\
+          }'\n    )\n\n    def query_student(question: str, max_retries: int = 10)\
+          \ -> str:\n        for attempt in range(max_retries):\n            try:\n\
+          \                resp = requests.post(\n                    f\"{student_url}/v1/chat/completions\"\
+          ,\n                    json={\n                        \"model\": \"/mnt/models\"\
+          ,\n                        \"messages\": [{\"role\": \"user\", \"content\"\
+          : question}],\n                        \"max_tokens\": 256,\n          \
+          \              \"temperature\": 0.3,\n                    },\n         \
+          \           timeout=120,\n                )\n                if resp.status_code\
+          \ in (400, 404, 503):\n                    wait = min(20 * (attempt + 1),\
+          \ 120)\n                    print(f\"  [{attempt+1}/{max_retries}] HTTP\
+          \ {resp.status_code}, vLLM not ready. Retry in {wait}s\")\n            \
+          \        time.sleep(wait)\n                    continue\n              \
+          \  if not resp.ok:\n                    print(f\"  HTTP {resp.status_code}\
+          \ from student: {resp.text[:500]}\")\n                resp.raise_for_status()\n\
+          \                return resp.json()[\"choices\"][0][\"message\"][\"content\"\
+          ]\n            except (requests.ConnectionError, requests.Timeout) as e:\n\
+          \                wait = min(20 * (attempt + 1), 120)\n                print(f\"\
+          \  [{attempt+1}/{max_retries}] Connection error, retry in {wait}s: {e}\"\
+          )\n                time.sleep(wait)\n        raise RuntimeError(f\"Student\
+          \ unreachable after {max_retries} retries\")\n\n    def _teacher_call(messages:\
+          \ list, max_tokens: int = 512, temperature: float = 0.7) -> str:\n     \
+          \   \"\"\"Call teacher LLM API with exponential backoff on 429/5xx errors.\"\
+          \"\"\n        last_error = None\n        for attempt in range(8):\n    \
+          \        try:\n                resp = requests.post(\n                 \
+          \   api_url,\n                    headers=api_headers,\n               \
+          \     json={\n                        \"model\": teacher_model,\n      \
+          \                  \"messages\": messages,\n                        \"max_tokens\"\
+          : max_tokens,\n                        \"temperature\": temperature,\n \
+          \                   },\n                    timeout=600,\n             \
+          \   )\n                if resp.status_code == 429 or resp.status_code >=\
+          \ 500:\n                    wait = min(2 ** attempt * 5, 120)\n        \
+          \            print(f\"  [{resp.status_code}] Server error, waiting {wait}s\
           \ (attempt {attempt+1}/8)\")\n                    last_error = f\"HTTP {resp.status_code}\"\
           \n                    time.sleep(wait)\n                    continue\n \
           \               resp.raise_for_status()\n                return resp.json()[\"\
@@ -1380,14 +1391,17 @@ deploymentSpec:
           \ as e:\n        print(f\"[{time.strftime('%H:%M:%S')}] Could not query\
           \ nodes ({e}), falling back to 2 nodes x 4 GPUs\")\n        available_gpu_nodes\
           \ = 2\n        gpus_per_node_list = [4, 4]\n\n    num_gpus_per_node = min(gpus_per_node_list)\
-          \ if gpus_per_node_list else 4\n    num_workers = max(0, available_gpu_nodes\
-          \ - 1)\n    total_gpus = available_gpu_nodes * num_gpus_per_node\n    print(f\"\
-          [{time.strftime('%H:%M:%S')}] GPU topology: {available_gpu_nodes} usable\
-          \ nodes x {num_gpus_per_node} GPUs/node = {total_gpus} total\")\n\n    print(\"\
+          \ if gpus_per_node_list else 4\n\n    # Reserve 1 node as buffer for always-on\
+          \ services (Ollama, etc.)\n    safe_gpu_nodes = max(1, available_gpu_nodes\
+          \ - 1)\n    print(f\"[{time.strftime('%H:%M:%S')}] Reserving 1 node buffer\
+          \ -> {safe_gpu_nodes} schedulable nodes\")\n\n    num_workers = max(0, safe_gpu_nodes\
+          \ - 1)\n    total_gpus = safe_gpu_nodes * num_gpus_per_node\n    print(f\"\
+          [{time.strftime('%H:%M:%S')}] GPU topology: {safe_gpu_nodes} usable nodes\
+          \ x {num_gpus_per_node} GPUs/node = {total_gpus} total\")\n\n    print(\"\
           =\" * 60)\n    print(\"SFT FINE-TUNE STEP (PyTorchJob, multi-node multi-GPU)\"\
           )\n    print(\"=\" * 60)\n    print(f\"  Job name:     {job_name}\")\n \
           \   print(f\"  Image:        {image}\")\n    print(f\"  Nodes:        1\
-          \ Master + {num_workers} Workers = {available_gpu_nodes} nodes\")\n    print(f\"\
+          \ Master + {num_workers} Workers = {safe_gpu_nodes} nodes\")\n    print(f\"\
           \  GPUs/node:    {num_gpus_per_node}\")\n    print(f\"  Total GPUs:   {total_gpus}\"\
           )\n    print(f\"  Base model:   {base_model_id}\")\n    print(f\"  Gold\
           \ data:    {gold_data_path}\")\n    print(f\"  Output:       {model_output_s3_path}\"\
@@ -1796,6 +1810,19 @@ root:
         - resolve-version
         inputs:
           parameters:
+            grading_prompt:
+              runtimeValue:
+                constant: 'You are grading an AI-generated code review comment. Rate
+                  it 1-10. Scoring guide: - 8-10: Correctly identifies the main issue(s)
+                  in the diff. Bonus if concise. - 6-7: Identifies the issue but is
+                  verbose, vague, or missing minor details. - 4-5: Partially correct
+                  -- mentions something relevant but misses the key issue. - 2-3:
+                  Mostly wrong, hallucinated issues, or says code is fine when it
+                  has real bugs. - 1: Completely irrelevant or nonsensical. If the
+                  code is genuinely clean, saying ''LGTM'' or ''no issues'' is correct
+                  and scores 8+. Correctness matters most. A correct but verbose answer
+                  is better than a wrong concise one. Respond with ONLY a JSON object:
+                  {"score": <number>, "reason": "<brief reason>"}'
             mlflow_tracking_uri:
               runtimeValue:
                 constant: http://mlflow.sridharproject.svc.cluster.local:5000
