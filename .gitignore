@@ -87,7 +87,6 @@ taskDone.txtextension/
 docs/
 images/
 .cursor/plans/
-.cursor/skills/
 
 # —— Compiled pipeline YAMLs (regenerate from .py) ————————————————
 pipeline/*.yaml
