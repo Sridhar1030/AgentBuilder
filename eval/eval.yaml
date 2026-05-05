@@ -1,0 +1,177 @@
+# Agent-Eval-Harness configuration for Code Review SLM evaluation
+#
+# Uses the agent-eval-harness judge framework to evaluate the distilled
+# code review model with structured, multi-dimensional scoring.
+#
+# Judges:
+#   1. correctness  -- inline check: did the review catch the real issue?
+#   2. conciseness  -- inline check: is the review PR-comment length?
+#   3. review_quality -- LLM judge: is the review actionable and specific?
+#   4. format_check -- inline check: does the response avoid filler/boilerplate?
+#
+# Run with:
+#   python3 agent-eval-harness/skills/eval-run/scripts/score.py judges \
+#     --run-id <id> --config eval/eval.yaml
+
+name: code-review-slm-eval
+description: Evaluate the distilled code review SLM against structured judges
+skill: distill-code-review
+
+execution:
+  mode: case
+  arguments: "{diff}"
+
+runner:
+  type: openai-compatible
+
+models:
+  skill: /mnt/models
+  judge: qwen2.5-coder:32b-instruct-q4_K_M
+
+mlflow:
+  experiment: CodeReview-Eval-Hub
+
+dataset:
+  path: eval/dataset/cases
+  schema: |
+    Each case directory contains:
+    - input.yaml: YAML file with 'diff' (the code diff to review),
+      'category' (bug/security/performance/kubernetes/reliability/
+      style/clean), and 'expected_behavior' describing what a correct
+      review should identify (or 'clean: no issues' if the code is fine).
+    - reference.md: Gold standard review from the teacher model.
+    - annotations.yaml: Metadata for judges -- has_bug (bool),
+      expected_issues (list of strings), category (string).
+
+outputs:
+  - path: artifacts
+    schema: |
+      One text file per case (response.md) containing the student
+      model's code review response.
+
+traces:
+  metrics: true
+  stdout: true
+
+judges:
+  # Judge 1: Correctness (inline check -- no LLM needed)
+  # Checks both directions:
+  # - Bug present: review must NOT say LGTM, and must mention at least
+  #   one keyword from expected_issues.
+  # - Clean code: review must NOT hallucinate serious problems.
+  - name: correctness
+    description: |
+      Does the review correctly identify whether the code has issues?
+      For buggy code, verifies the review mentions expected issues.
+      For clean code, verifies no hallucinated serious problems.
+    check: |
+      review = outputs.get("artifacts_content", "").lower()
+      if not review:
+          return False, "No review output found"
+      annotations = outputs.get("annotations", {})
+      has_bug = annotations.get("has_bug", True)
+      if has_bug:
+          lgtm_phrases = ["lgtm", "looks good to me", "no issues found",
+                          "code looks clean", "no problems", "no concerns"]
+          if any(p in review for p in lgtm_phrases):
+              return False, "Review missed a real bug (said LGTM/no issues)"
+          expected = annotations.get("expected_issues", [])
+          if expected:
+              matched = []
+              for issue in expected:
+                  keywords = [w.lower() for w in issue.split() if len(w) > 3][:4]
+                  if any(kw in review for kw in keywords):
+                      matched.append(issue)
+              if not matched:
+                  return False, f"Review didn't address expected issues: {expected[:2]}"
+          return True, "Review identified a relevant issue in buggy code"
+      else:
+          false_positive_phrases = [
+              "vulnerability", "injection", "exploit",
+              "critical bug", "serious issue", "major flaw",
+              "security risk", "memory leak", "race condition",
+              "must be fixed", "needs to be fixed", "should be fixed immediately",
+          ]
+          flagged = [p for p in false_positive_phrases if p in review]
+          if flagged:
+              return False, f"Hallucinated serious issues in clean code: {flagged}"
+          return True, "Correctly handled clean code"
+
+  # Judge 2: Conciseness (inline check -- no LLM needed)
+  - name: conciseness
+    description: |
+      Is the review concise enough for a PR comment? Target is under
+      200 words. Verbose reviews (200-400 words) partially fail.
+      Reviews over 400 words fully fail.
+    check: |
+      review = outputs.get("artifacts_content", "")
+      if not review:
+          return False, "No review output found"
+      word_count = len(review.split())
+      if word_count <= 200:
+          return True, f"Concise review ({word_count} words)"
+      elif word_count <= 400:
+          return False, f"Verbose review ({word_count} words, target is under 200)"
+      else:
+          return False, f"Far too verbose ({word_count} words)"
+
+  # Judge 3: Review Quality (LLM judge -- uses teacher model)
+  - name: review_quality
+    description: |
+      Evaluate the quality of the code review: is it actionable,
+      specific, and relevant to the diff? Score 1-5.
+    prompt: |
+      You are evaluating an AI-generated code review comment for a
+      code diff. The review and the original diff are provided below.
+
+      Score the review 1-5:
+      5: Correctly identifies the key issue, suggests a specific fix, concise
+      4: Identifies the issue correctly but could be more specific or actionable
+      3: Partially relevant but misses important details or key issues
+      2: Mostly wrong, addresses the wrong concern, or hallucinates problems
+      1: Completely irrelevant, nonsensical, or empty
+
+      If the code is genuinely clean and the review correctly says so
+      (e.g., "LGTM", "no issues"), that scores 4-5.
+
+      {{ outputs }}
+
+      {{ annotations }}
+
+      Respond with a JSON object: {"score": <1-5>, "rationale": "<brief reason>"}
+
+  # Judge 4: Format check (inline check -- no LLM needed)
+  - name: format_check
+    description: |
+      Does the review avoid generic boilerplate and filler phrases?
+      Good reviews get straight to the point.
+    check: |
+      review = outputs.get("artifacts_content", "").lower()
+      if not review:
+          return False, "No review output found"
+      filler_phrases = [
+          "let me analyze",
+          "let's examine",
+          "here is my review",
+          "i will now review",
+          "upon careful examination",
+          "after thorough analysis",
+          "in this code review",
+          "overall, the changes",
+          "in summary, ",
+          "to summarize, ",
+      ]
+      found = [p for p in filler_phrases if p in review]
+      if len(found) >= 2:
+          return False, f"Contains boilerplate filler: {found}"
+      return True, "Clean format, gets to the point"
+
+thresholds:
+  correctness:
+    min_pass_rate: 0.7
+  conciseness:
+    min_pass_rate: 0.8
+  review_quality:
+    min_mean: 3.5
+  format_check:
+    min_pass_rate: 0.7

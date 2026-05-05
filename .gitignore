@@ -83,6 +83,15 @@ venv311/
 mlflow.db
 taskDone.txtextension/
 
-# —— Docs & images ————————————————————————————————————————————————
+# —— Docs, plans & knowledge bases ————————————————————————————————
 docs/
 images/
+.cursor/plans/
+.cursor/skills/
+
+# —— Compiled pipeline YAMLs (regenerate from .py) ————————————————
+pipeline/*.yaml
+
+# —— Generated eval artifacts (regenerate with generate_cases.py) —
+eval/dataset/
+eval/prompts/

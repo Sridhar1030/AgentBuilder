@@ -67,6 +67,11 @@ domain:
   # You can also point to a JSON file: test_questions_file: "domain/test_questions.json"
   test_questions_file: "pipeline/domain/test_questions.json"
 
+  # Agent-eval-harness configuration for structured judge evaluation.
+  # See eval/eval.yaml for judge definitions, thresholds, and dataset schema.
+  eval_yaml: "eval/eval.yaml"
+  eval_cases_dir: "eval/dataset/cases"
+
 # -- TRAINING CONFIG ----------------------------------------------------------
 # Hyperparameters. Sensible defaults provided -- tune as needed.
 training:

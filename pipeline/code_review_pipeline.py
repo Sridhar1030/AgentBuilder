@@ -1,8 +1,8 @@
 """
 KFP Pipeline -- Code Review SLM (Phase 3)
 
-Distills a code review SLM from a teacher LLM using SFT + DPO.
-Completely separate from the Phase 2 Kubeflow Q&A pipeline.
+Distills a code review SLM from a teacher LLM using SFT + DPO,
+with eval-gated deployment via agent-eval-harness structured judges.
 
 Steps:
   0. Resolve version (auto-increment code-review-1.5b-vN)
@@ -11,8 +11,11 @@ Steps:
   3. Deploy SFT model via KServe (temporary, needed for DPO preference extraction)
   4. Extract DPO preference pairs (teacher vs deployed SFT student)
   5. DPO fine-tune (refine SFT model with preferences)
-  6. Deploy final DPO model via KServe (overwrites SFT)
-  7. Evaluate final model
+  6. Deploy DPO model via KServe (staging -- for evaluation)
+  7. Evaluate final model with structured judges
+  8. Quality gate -- check harness thresholds
+  9. If pass:  DPO model stays deployed (already live from step 6)
+     If fail:  Roll back to SFT model (redeploy from step 2 output)
 
 Compile:
     cd pipeline && python code_review_pipeline.py
@@ -36,6 +39,8 @@ from components.merge_preferences import merge_preferences
 from components.dpo_finetune import dpo_finetune
 from components.deploy_model import deploy_model
 from components.evaluate import evaluate
+from components.quality_gate import quality_gate
+from components.eval_optimize import eval_optimize
 
 
 def _load_config():
@@ -87,10 +92,17 @@ QUESTION_BANK_S3 = _CFG["domain"]["question_bank_s3"]
 _tq_file = Path(__file__).resolve().parent.parent / _CFG["domain"]["test_questions_file"]
 if _tq_file.exists():
     with open(_tq_file) as f:
-        _tq_data = json.load(f)
-    TEST_QUESTIONS = [item["question"] for item in _tq_data]
+        TEST_QUESTIONS = json.load(f)
 else:
     raise FileNotFoundError(f"Test questions file not found: {_tq_file}")
+
+# Load eval.yaml content as string to pass into the evaluate component
+_eval_yaml_file = Path(__file__).resolve().parent.parent / _CFG["domain"]["eval_yaml"]
+if _eval_yaml_file.exists():
+    with open(_eval_yaml_file) as f:
+        EVAL_YAML_CONTENT = f.read()
+else:
+    EVAL_YAML_CONTENT = ""
 
 
 @dsl.component(
@@ -166,7 +178,7 @@ def extract_code_review_gold(
 
 @dsl.pipeline(
     name="code-review-slm",
-    description="Code Review SLM: SFT + DPO distillation on Go/Python/K8s code diffs using Qwen2.5-Coder-1.5B.",
+    description="Code Review SLM: SFT + DPO distillation with eval-gated deployment.",
 )
 def code_review_pipeline(
     model_version: str = "",
@@ -206,8 +218,6 @@ def code_review_pipeline(
     extract_task.set_caching_options(False)
 
     # Step 2 -- SFT fine-tune with QLoRA (GPU)
-    # Iterative training (Option B): resolve_version returns the previous run's
-    # S3 model path if one exists, otherwise returns the HF base model ID.
     sft_task = finetune(
         gold_data_path=extract_task.output,
         model_output_s3_path=version_task.outputs["model_output_path"],
@@ -227,8 +237,7 @@ def code_review_pipeline(
     )
     deploy_sft_task.set_caching_options(False)
 
-    # Step 4a -- Collect human feedback DPO pairs from MinIO (runs early,
-    #            parallel with SFT+deploy since it only reads from S3)
+    # Step 4a -- Collect human feedback DPO pairs from MinIO
     human_fb_task = collect_human_feedback(
         s3_endpoint=S3_ENDPOINT,
         s3_access_key=s3_access_key,
@@ -255,7 +264,7 @@ def code_review_pipeline(
     pref_task.after(deploy_sft_task)
     pref_task.set_caching_options(False)
 
-    # Step 4c -- Merge all preference sources (static bank + live + human + SFT regularization)
+    # Step 4c -- Merge all preference sources
     merge_task = merge_preferences(
         pipeline_pref_path=pref_task.output,
         human_feedback_path=human_fb_task.output,
@@ -280,7 +289,7 @@ def code_review_pipeline(
     )
     dpo_task.set_caching_options(False)
 
-    # Step 6 -- Deploy final DPO model via KServe
+    # Step 6 -- Deploy DPO model (staging -- for evaluation)
     deploy_dpo_task = deploy_model(
         model_s3_path=dpo_task.output,
         isvc_name=ISVC_NAME,
@@ -288,21 +297,50 @@ def code_review_pipeline(
     )
     deploy_dpo_task.set_caching_options(False)
 
-    # Step 7 -- Evaluate final model
+    # Step 7 -- Evaluate with harness judges (loaded from eval.yaml)
     eval_task = evaluate(
         student_url=deploy_dpo_task.output,
         teacher_api_url=teacher_api_url,
         teacher_model=teacher_model,
         teacher_api_key=teacher_api_key,
         test_questions=TEST_QUESTIONS,
+        eval_yaml_content=EVAL_YAML_CONTENT,
         mlflow_tracking_uri=MLFLOW_URI,
         model_version=version_task.outputs["version"],
         s3_endpoint=S3_ENDPOINT,
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,
-        grading_prompt=_CFG["domain"]["grading_prompt"],
     )
     eval_task.set_caching_options(False)
+
+    # Step 8 -- Quality gate (extracts pass/fail for pipeline branching)
+    gate_task = quality_gate(eval_results=eval_task.output)
+    gate_task.set_caching_options(False)
+
+    # Step 9 -- Eval optimize: analyze failures, generate recommendations
+    optimize_task = eval_optimize(
+        eval_results=eval_task.output,
+        teacher_api_url=teacher_api_url,
+        teacher_model=teacher_model,
+        teacher_api_key=teacher_api_key,
+        current_config=json.dumps(_CFG),
+        mlflow_tracking_uri=MLFLOW_URI,
+        model_version=version_task.outputs["version"],
+        s3_endpoint=S3_ENDPOINT,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+    )
+    optimize_task.after(gate_task)
+    optimize_task.set_caching_options(False)
+
+    # Step 10 -- Conditional rollback: if gate fails, redeploy the SFT model
+    with dsl.If(gate_task.output == "fail", name="rollback-on-failure"):
+        rollback_task = deploy_model(
+            model_s3_path=sft_task.output,
+            isvc_name=ISVC_NAME,
+            namespace=NAMESPACE,
+        )
+        rollback_task.set_caching_options(False)
 
 
 if __name__ == "__main__":
