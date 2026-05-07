@@ -213,44 +213,45 @@ def finetune(
         "/opt/scripts/finetune_job.py",
     ]
 
+    replica_specs = {
+        "Master": {
+            "replicas": 1,
+            "restartPolicy": "Never",
+            "template": {
+                "spec": {
+                    **pod_spec,
+                    "nodeSelector": node_selector,
+                    "containers": [{
+                        **container_spec,
+                        "command": ["torchrun"],
+                        "args": torchrun_args,
+                    }],
+                },
+            },
+        },
+    }
+    if num_workers > 0:
+        replica_specs["Worker"] = {
+            "replicas": num_workers,
+            "restartPolicy": "Never",
+            "template": {
+                "spec": {
+                    **pod_spec,
+                    "nodeSelector": node_selector,
+                    "containers": [{
+                        **container_spec,
+                        "command": ["torchrun"],
+                        "args": torchrun_args,
+                    }],
+                },
+            },
+        }
+
     pytorchjob = {
         "apiVersion": "kubeflow.org/v1",
         "kind": "PyTorchJob",
         "metadata": {"name": job_name, "namespace": namespace},
-        "spec": {
-            "pytorchReplicaSpecs": {
-                "Master": {
-                    "replicas": 1,
-                    "restartPolicy": "Never",
-                    "template": {
-                        "spec": {
-                            **pod_spec,
-                            "nodeSelector": node_selector,
-                            "containers": [{
-                                **container_spec,
-                                "command": ["torchrun"],
-                                "args": torchrun_args,
-                            }],
-                        },
-                    },
-                },
-                "Worker": {
-                    "replicas": num_workers,
-                    "restartPolicy": "Never",
-                    "template": {
-                        "spec": {
-                            **pod_spec,
-                            "nodeSelector": node_selector,
-                            "containers": [{
-                                **container_spec,
-                                "command": ["torchrun"],
-                                "args": torchrun_args,
-                            }],
-                        },
-                    },
-                },
-            },
-        },
+        "spec": {"pytorchReplicaSpecs": replica_specs},
     }
 
     custom_api.create_namespaced_custom_object(

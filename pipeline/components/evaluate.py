@@ -30,6 +30,7 @@ def evaluate(
     teacher_api_key: str,
     test_questions: list,
     eval_yaml_content: str,
+    system_prompt: str = "",
     mlflow_tracking_uri: str = "",
     model_version: str = "unknown",
     s3_endpoint: str = "",
@@ -205,14 +206,22 @@ def evaluate(
 
     # -- Helper functions --------------------------------------------------
 
+    student_messages_prefix = []
+    if system_prompt:
+        student_messages_prefix = [{"role": "system", "content": system_prompt}]
+        print(f"  System prompt: {system_prompt[:80]}...")
+    else:
+        print("  WARNING: No system prompt set -- student may underperform")
+
     def query_student(question: str, max_retries: int = 10) -> str:
+        messages = student_messages_prefix + [{"role": "user", "content": question}]
         for attempt in range(max_retries):
             try:
                 resp = requests.post(
                     f"{student_url}/v1/chat/completions",
                     json={"model": "/mnt/models",
-                          "messages": [{"role": "user", "content": question}],
-                          "max_tokens": 256, "temperature": 0.3},
+                          "messages": messages,
+                          "max_tokens": 512, "temperature": 0.3},
                     timeout=120)
                 if resp.status_code in (400, 404, 503):
                     wait = min(20 * (attempt + 1), 120)

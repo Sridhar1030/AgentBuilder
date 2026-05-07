@@ -26,6 +26,7 @@ def eval_optimize(
     teacher_model: str,
     teacher_api_key: str,
     current_config: str,
+    dpo_model_s3_path: str = "",
     mlflow_tracking_uri: str = "",
     model_version: str = "unknown",
     s3_endpoint: str = "",
@@ -265,6 +266,37 @@ def eval_optimize(
         print(f"  Prompt: {adj['action']} -- {adj['detail'][:80]}")
     print(f"\n  Analysis: {analysis_summary[:200]}")
     print("=" * 60)
+
+    # -- Write .gate-passed marker for resolve_version ----------------------
+    # When the quality gate passes and we have a DPO output path, write a
+    # small marker so the next pipeline run knows this DPO model is safe to
+    # use as the training base.
+
+    dpo_actually_ran = dpo_model_s3_path and "-dpo/" in dpo_model_s3_path
+    if gate_result == "pass" and dpo_actually_ran:
+        try:
+            import boto3
+            s3 = boto3.client(
+                "s3", endpoint_url=s3_endpoint,
+                aws_access_key_id=s3_access_key,
+                aws_secret_access_key=s3_secret_key,
+            )
+            parts = dpo_model_s3_path.replace("s3://", "").split("/", 1)
+            marker_key = parts[1].rstrip("/") + "/.gate-passed"
+            marker_body = json.dumps({
+                "gate_result": "pass",
+                "composite_score": composite,
+                "model_version": model_version,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
+            s3.put_object(Bucket=parts[0], Key=marker_key, Body=marker_body.encode())
+            print(f"  Wrote .gate-passed marker to s3://{parts[0]}/{marker_key}")
+        except Exception as e:
+            print(f"  WARNING: Failed to write .gate-passed marker: {e}")
+    elif gate_result == "pass" and not dpo_actually_ran:
+        print(f"  Gate=pass but DPO was skipped (path={dpo_model_s3_path}) -- no marker written")
+    else:
+        print(f"  Gate={gate_result} -- no .gate-passed marker written (next run uses SFT model)")
 
     # -- Log to MLflow -----------------------------------------------------
 

@@ -1,0 +1,15 @@
+# Persistent storage for canary split state.
+# Read by canary_gateway.py on startup, updated on every split change.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traffic-split
+  namespace: sridharproject
+  labels:
+    app: canary-gateway
+    component: traffic-split
+data:
+  teacher_weight: "90"
+  student_weight: "10"
+  last_student_score: "0.0"
+  shift_history: "[]"

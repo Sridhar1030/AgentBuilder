@@ -33,7 +33,8 @@ def extract_preferences(
     s3_access_key: str,
     s3_secret_key: str,
     pref_output_bucket: str = "mlflow-artifacts",
-    min_score_gap: int = 1,
+    system_prompt: str = "",
+    min_score_gap: int = 2,
     max_supplement_questions: int = 5,
 ) -> str:
     """Build DPO preference pairs from eval results + supplementary question bank queries."""
@@ -133,14 +134,18 @@ def extract_preferences(
         return False
 
     def query_student(question: str) -> str:
+        messages = [
+            {"role": "system", "content": TEACHER_SYSTEM},
+            {"role": "user", "content": question},
+        ]
         for attempt in range(8):
             try:
                 resp = requests.post(
                     f"{student_url}/v1/chat/completions",
                     json={
                         "model": "/mnt/models",
-                        "messages": [{"role": "user", "content": question}],
-                        "max_tokens": 256,
+                        "messages": messages,
+                        "max_tokens": 512,
                         "temperature": 0.3,
                     },
                     timeout=180,
@@ -159,7 +164,7 @@ def extract_preferences(
         print("    [Student] All retries exhausted, returning empty")
         return ""
 
-    TEACHER_SYSTEM = (
+    TEACHER_SYSTEM = system_prompt if system_prompt else (
         "You are a senior code reviewer specializing in Go, Python, and Kubernetes. "
         "Review the given code diff and identify any issues related to bugs, security, "
         "performance, reliability, style, or Kubernetes best practices. "

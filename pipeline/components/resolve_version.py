@@ -14,6 +14,7 @@ VersionOutputs = NamedTuple(
         ("version", str),
         ("gold_data_path", str),
         ("model_output_path", str),
+        ("dpo_model_output_path", str),
         ("prev_model_path", str),
     ],
 )
@@ -32,7 +33,7 @@ def resolve_version(
     gold_bucket: str,
     hf_base_model_id: str = "Qwen/Qwen2.5-Coder-1.5B-Instruct",
     explicit_version: str = "",
-) -> NamedTuple("VersionOutputs", [("version", str), ("gold_data_path", str), ("model_output_path", str), ("prev_model_path", str)]):
+) -> NamedTuple("VersionOutputs", [("version", str), ("gold_data_path", str), ("model_output_path", str), ("dpo_model_output_path", str), ("prev_model_path", str)]):
     """Find the latest student-1b-vN/ in MinIO and return vN+1 with paths."""
     import re
     from collections import namedtuple
@@ -77,19 +78,44 @@ def resolve_version(
 
     if version_numbers:
         prev_version = max(version_numbers)
-        prev_model_path = f"s3://{model_bucket}/{model_prefix}v{prev_version}/"
-        print(f"Previous model: {prev_model_path} (iterative SFT will start from here)")
+        sft_path = f"s3://{model_bucket}/{model_prefix}v{prev_version}/"
+        dpo_path = f"s3://{model_bucket}/{model_prefix}v{prev_version}-dpo/"
+        gate_marker_key = f"{model_prefix}v{prev_version}-dpo/.gate-passed"
+
+        # Prefer the DPO model if it passed the quality gate (marker file exists)
+        use_dpo = False
+        try:
+            s3.head_object(Bucket=model_bucket, Key=gate_marker_key)
+            use_dpo = True
+            print(f"Found .gate-passed marker at {gate_marker_key}")
+        except s3.exceptions.NoSuchKey:
+            print(f"No .gate-passed marker at {gate_marker_key} -- using SFT model")
+        except Exception as e:
+            err_code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
+            if err_code in ("404", "NoSuchKey"):
+                print(f"No .gate-passed marker at {gate_marker_key} -- using SFT model")
+            else:
+                print(f"WARNING: S3 error checking gate marker ({e}) -- falling back to SFT model")
+
+        if use_dpo:
+            prev_model_path = dpo_path
+            print(f"Previous model: {prev_model_path} (DPO-improved, gate passed)")
+        else:
+            prev_model_path = sft_path
+            print(f"Previous model: {prev_model_path} (SFT checkpoint)")
     else:
         prev_model_path = hf_base_model_id
         print(f"No previous model found -- SFT will start from HuggingFace base: {hf_base_model_id}")
 
     gold_data_path = f"s3://{gold_bucket}/gold/train-{version}.jsonl"
     model_output_path = f"s3://{model_bucket}/{model_prefix}{version}/"
+    dpo_model_output_path = f"s3://{model_bucket}/{model_prefix}{version}-dpo/"
 
     print(f"Version: {version}")
     print(f"Gold data path: {gold_data_path}")
-    print(f"Model output path: {model_output_path}")
+    print(f"Model output path (SFT): {model_output_path}")
+    print(f"Model output path (DPO): {dpo_model_output_path}")
     print(f"Prev model path: {prev_model_path or '(none)'}")
 
-    Outputs = namedtuple("VersionOutputs", ["version", "gold_data_path", "model_output_path", "prev_model_path"])
-    return Outputs(version=version, gold_data_path=gold_data_path, model_output_path=model_output_path, prev_model_path=prev_model_path)
+    Outputs = namedtuple("VersionOutputs", ["version", "gold_data_path", "model_output_path", "dpo_model_output_path", "prev_model_path"])
+    return Outputs(version=version, gold_data_path=gold_data_path, model_output_path=model_output_path, dpo_model_output_path=dpo_model_output_path, prev_model_path=prev_model_path)

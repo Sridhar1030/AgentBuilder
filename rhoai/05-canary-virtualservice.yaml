@@ -1,0 +1,33 @@
+# Istio VirtualService -- weighted traffic split between Teacher and Student
+# Managed by canary_gateway.py (PATCH on split change) and traffic_shift KFP component.
+#
+# Prerequisites:
+#   1. Istio sidecar injection enabled for the namespace:
+#      oc label namespace sridharproject istio-injection=enabled
+#   2. Teacher (ollama) and Student (code-review-llm-predictor) services running
+#
+# Without sidecar injection, the VirtualService is declarative only.
+# The canary_gateway.py handles routing regardless.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: code-review-gateway
+  namespace: sridharproject
+  labels:
+    app: canary-gateway
+    component: traffic-split
+spec:
+  hosts:
+    - code-review-gateway.sridharproject.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: ollama.sridharproject.svc.cluster.local
+            port:
+              number: 11434
+          weight: 90
+        - destination:
+            host: code-review-llm-predictor.sridharproject.svc.cluster.local
+            port:
+              number: 80
+          weight: 10

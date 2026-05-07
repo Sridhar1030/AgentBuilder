@@ -76,12 +76,26 @@ domain:
 # Hyperparameters. Sensible defaults provided -- tune as needed.
 training:
   sft_epochs: 3
-  dpo_epochs: 1
+  dpo_epochs: 3
   dpo_beta: 0.3
-  min_dpo_pairs: 3
+  min_dpo_pairs: 10
   max_supplement_questions: 5
   static_bank_sample_size: 300
   sft_mix_ratio: 0.15
+
+# -- CANARY CONFIG ------------------------------------------------------------
+# Progressive traffic splitting between Teacher and Student.
+# The canary gateway routes requests, adds model attribution, and syncs
+# weights to an Istio VirtualService for production-level routing.
+canary:
+  enabled: true
+  gateway_url: "http://canary-gateway.{{namespace}}.svc.cluster.local:8090"
+  virtualservice_name: "code-review-gateway"
+  teacher_service: "http://ollama.{{namespace}}.svc.cluster.local:11434"
+  student_service: "http://code-review-llm-predictor.{{namespace}}.svc.cluster.local:80"
+  shift_increment: 10
+  initial_teacher_weight: 90
+  initial_student_weight: 10
 
 # -- IMAGES -------------------------------------------------------------------
 # Container images. /distill.prerequisites builds these in-cluster.

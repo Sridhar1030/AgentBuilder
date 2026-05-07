@@ -22,13 +22,14 @@ def dpo_finetune(
     s3_endpoint: str,
     s3_access_key: str,
     s3_secret_key: str,
-    num_epochs: int = 1,
+    dpo_output_s3_path: str = "",
+    num_epochs: int = 3,
     batch_size: int = 1,
     learning_rate: float = 5e-5,
     lora_r: int = 16,
     lora_alpha: int = 32,
-    dpo_beta: float = 0.1,
-    min_pairs: int = 3,
+    dpo_beta: float = 0.3,
+    min_pairs: int = 10,
 ) -> str:
     """Create a PyTorchJob for multi-GPU DPO training."""
     import time
@@ -50,7 +51,7 @@ def dpo_finetune(
     print(f"  Min pairs:    {min_pairs}")
     print("=" * 60)
 
-    model_output_s3_path = sft_model_s3_path
+    model_output_s3_path = dpo_output_s3_path if dpo_output_s3_path else sft_model_s3_path
 
     s3 = boto3.client(
         "s3",
@@ -181,14 +182,13 @@ def dpo_finetune(
     safe_gpu_nodes = max(1, available_gpu_nodes - 1)
     print(f"[{time.strftime('%H:%M:%S')}] Reserving 1 node buffer -> {safe_gpu_nodes} schedulable nodes")
 
-    # --- Cap by dataset size: need >= 6 samples per GPU for meaningful DPO ---
-    min_samples_per_gpu = 6
-    max_data_nodes = max(1, num_pref_pairs // (min_samples_per_gpu * num_gpus_per_node))
-
-    num_total_nodes = min(max_data_nodes, safe_gpu_nodes)
-    num_workers = max(0, num_total_nodes - 1)
-    total_gpus = num_total_nodes * num_gpus_per_node
-    print(f"[{time.strftime('%H:%M:%S')}] Auto-scaled DPO: {num_pref_pairs} pairs -> {num_total_nodes} nodes ({num_workers} workers) x {num_gpus_per_node} GPUs = {total_gpus} GPUs")
+    # DPO with small datasets (<100 pairs) benefits from fewer GPUs (more
+    # optimizer steps per epoch) rather than more GPUs (data gets split too
+    # thin, leading to ~1 step and loss stuck at ln(2)).
+    num_total_nodes = 1
+    num_workers = 0
+    total_gpus = num_gpus_per_node
+    print(f"[{time.strftime('%H:%M:%S')}] DPO forced single-node: {num_pref_pairs} pairs -> 1 node x {num_gpus_per_node} GPUs = {total_gpus} GPUs")
 
     env_list = [
         {"name": "TRAINING_MODE", "value": "dpo"},
@@ -237,44 +237,45 @@ def dpo_finetune(
         "/opt/scripts/finetune_job.py",
     ]
 
+    replica_specs = {
+        "Master": {
+            "replicas": 1,
+            "restartPolicy": "Never",
+            "template": {
+                "spec": {
+                    **pod_spec,
+                    "nodeSelector": node_selector,
+                    "containers": [{
+                        **container_spec,
+                        "command": ["torchrun"],
+                        "args": torchrun_args,
+                    }],
+                },
+            },
+        },
+    }
+    if num_workers > 0:
+        replica_specs["Worker"] = {
+            "replicas": num_workers,
+            "restartPolicy": "Never",
+            "template": {
+                "spec": {
+                    **pod_spec,
+                    "nodeSelector": node_selector,
+                    "containers": [{
+                        **container_spec,
+                        "command": ["torchrun"],
+                        "args": torchrun_args,
+                    }],
+                },
+            },
+        }
+
     pytorchjob = {
         "apiVersion": "kubeflow.org/v1",
         "kind": "PyTorchJob",
         "metadata": {"name": job_name, "namespace": namespace},
-        "spec": {
-            "pytorchReplicaSpecs": {
-                "Master": {
-                    "replicas": 1,
-                    "restartPolicy": "Never",
-                    "template": {
-                        "spec": {
-                            **pod_spec,
-                            "nodeSelector": node_selector,
-                            "containers": [{
-                                **container_spec,
-                                "command": ["torchrun"],
-                                "args": torchrun_args,
-                            }],
-                        },
-                    },
-                },
-                "Worker": {
-                    "replicas": num_workers,
-                    "restartPolicy": "Never",
-                    "template": {
-                        "spec": {
-                            **pod_spec,
-                            "nodeSelector": node_selector,
-                            "containers": [{
-                                **container_spec,
-                                "command": ["torchrun"],
-                                "args": torchrun_args,
-                            }],
-                        },
-                    },
-                },
-            },
-        },
+        "spec": {"pytorchReplicaSpecs": replica_specs},
     }
 
     custom_api.create_namespaced_custom_object(

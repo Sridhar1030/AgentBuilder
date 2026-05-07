@@ -33,6 +33,7 @@ from components.quality_gate import quality_gate
 from components.eval_optimize import eval_optimize
 from components.eval_analyze import eval_analyze
 from components.eval_dataset import eval_dataset
+from components.traffic_shift import traffic_shift
 
 
 def _load_config():
@@ -75,6 +76,13 @@ TEACHER_BUCKET = _CFG["cluster"]["data_bucket"]
 SYNTHETIC_BUCKET = _CFG["cluster"]["data_bucket"]
 SYNTHETIC_PREFIX = _CFG["domain"]["training_data_prefix"]
 QUESTION_BANK_S3 = _CFG["domain"]["question_bank_s3"]
+
+TEACHER_SYSTEM_PROMPT = _CFG["teacher"]["system_prompt"]
+
+CANARY_ENABLED = _CFG.get("canary", {}).get("enabled", False)
+CANARY_GATEWAY_URL = _CFG.get("canary", {}).get("gateway_url", "")
+CANARY_VS_NAME = _CFG.get("canary", {}).get("virtualservice_name", "code-review-gateway")
+CANARY_SHIFT_INCREMENT = _CFG.get("canary", {}).get("shift_increment", 10)
 
 _tq_file = Path(__file__).resolve().parent.parent / _CFG["domain"]["test_questions_file"]
 if _tq_file.exists():
@@ -164,6 +172,7 @@ def extract_code_review_gold(
 
 DistillOutputs = NamedTuple("DistillOutputs", [
     ("dpo_model_path", str),
+    ("dpo_output_s3_path", str),
     ("sft_model_path", str),
     ("version", str),
 ])
@@ -190,11 +199,12 @@ def distill_pipeline(
     teacher_api_key: str,
     question_bank_s3: str,
     mlflow_tracking_uri: str,
+    system_prompt: str = "",
     model_version: str = "",
     num_epochs: int = 3,
-    dpo_epochs: int = 1,
+    dpo_epochs: int = 3,
     dpo_beta: float = 0.3,
-    min_dpo_pairs: int = 3,
+    min_dpo_pairs: int = 10,
     max_supplement_questions: int = 5,
 ) -> DistillOutputs:
     # -- Resolve version (auto-increment code-review-1.5b-vN) --
@@ -263,6 +273,7 @@ def distill_pipeline(
         s3_endpoint=s3_endpoint,
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,
+        system_prompt=system_prompt,
         max_supplement_questions=max_supplement_questions,
     )
     pref_task.after(deploy_sft_task)
@@ -279,7 +290,7 @@ def distill_pipeline(
     )
     merge_task.set_caching_options(False)
 
-    # -- DPO fine-tune --
+    # -- DPO fine-tune (writes to separate vN-dpo/ prefix) --
     dpo_task = dpo_finetune(
         sft_model_s3_path=sft_task.output,
         pref_data_s3_path=merge_task.output,
@@ -287,6 +298,7 @@ def distill_pipeline(
         s3_endpoint=s3_endpoint,
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,
+        dpo_output_s3_path=version_task.outputs["dpo_model_output_path"],
         num_epochs=dpo_epochs,
         dpo_beta=dpo_beta,
         min_pairs=min_dpo_pairs,
@@ -295,6 +307,7 @@ def distill_pipeline(
 
     return DistillOutputs(
         dpo_model_path=dpo_task.output,
+        dpo_output_s3_path=version_task.outputs["dpo_model_output_path"],
         sft_model_path=sft_task.output,
         version=version_task.outputs["version"],
     )
@@ -381,6 +394,7 @@ def agentic_continual_learning_pipeline(
         teacher_api_key=teacher_api_key,
         question_bank_s3=QUESTION_BANK_S3,
         mlflow_tracking_uri=MLFLOW_URI,
+        system_prompt=TEACHER_SYSTEM_PROMPT,
         model_version=model_version,
         num_epochs=num_epochs,
         dpo_epochs=dpo_epochs,
@@ -410,6 +424,7 @@ def agentic_continual_learning_pipeline(
         teacher_api_key=teacher_api_key,
         test_questions=TEST_QUESTIONS,
         eval_yaml_content=EVAL_YAML_CONTENT,
+        system_prompt=TEACHER_SYSTEM_PROMPT,
         mlflow_tracking_uri=MLFLOW_URI,
         model_version=distill_task.outputs["version"],
         s3_endpoint=S3_ENDPOINT,
@@ -430,6 +445,7 @@ def agentic_continual_learning_pipeline(
         teacher_model=teacher_model,
         teacher_api_key=teacher_api_key,
         current_config=json.dumps(_CFG),
+        dpo_model_s3_path=distill_task.outputs["dpo_model_path"],
         mlflow_tracking_uri=MLFLOW_URI,
         model_version=distill_task.outputs["version"],
         s3_endpoint=S3_ENDPOINT,
@@ -449,6 +465,27 @@ def agentic_continual_learning_pipeline(
             namespace=NAMESPACE,
         )
         rollback_task.set_caching_options(False)
+
+    # =========================================================================
+    # 7. TRAFFIC SHIFT  (canary progressive migration)
+    #    Only runs if canary.enabled=true in distill.config.yaml.
+    #    Shifts traffic from teacher to student when eval score improves.
+    # =========================================================================
+    if CANARY_ENABLED:
+        shift_task = traffic_shift(
+            eval_results=eval_task.output,
+            gateway_url=CANARY_GATEWAY_URL,
+            namespace=NAMESPACE,
+            virtualservice_name=CANARY_VS_NAME,
+            shift_increment=CANARY_SHIFT_INCREMENT,
+            mlflow_tracking_uri=MLFLOW_URI,
+            model_version=distill_task.outputs["version"],
+            s3_endpoint=S3_ENDPOINT,
+            s3_access_key=s3_access_key,
+            s3_secret_key=s3_secret_key,
+        )
+        shift_task.after(optimize_task)
+        shift_task.set_caching_options(False)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ Environment Variables:
     LEARNING_RATE           Learning rate (default: 2e-4 for SFT, 5e-5 for DPO)
     LORA_R                  LoRA rank (default: 16)
     LORA_ALPHA              LoRA alpha (default: 32)
-    DPO_BETA                DPO beta parameter (default: 0.1)
+    DPO_BETA                DPO beta parameter (default: 0.3)
     S3_ENDPOINT             MinIO / S3 endpoint URL
     S3_ACCESS_KEY           S3 access key
     S3_SECRET_KEY           S3 secret key
@@ -221,7 +221,10 @@ def run_sft(s3):
     lora_config = LoraConfig(
         r=lora_r,
         lora_alpha=lora_alpha,
-        target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+        target_modules=[
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
@@ -304,12 +307,12 @@ def run_dpo(s3):
     pref_data_path = get_env("PREF_DATA_PATH")
     model_output_s3_path = get_env("MODEL_OUTPUT_S3_PATH")
     base_model_id = get_env("BASE_MODEL_ID")
-    num_epochs = int(get_env("NUM_EPOCHS", "1"))
+    num_epochs = int(get_env("NUM_EPOCHS", "3"))
     batch_size = int(get_env("BATCH_SIZE", "1"))
     learning_rate = float(get_env("LEARNING_RATE", "5e-5"))
     lora_r = int(get_env("LORA_R", "16"))
     lora_alpha = int(get_env("LORA_ALPHA", "32"))
-    dpo_beta = float(get_env("DPO_BETA", "0.1"))
+    dpo_beta = float(get_env("DPO_BETA", "0.3"))
 
     records = load_s3_jsonl(s3, pref_data_path)
     if not records:
@@ -360,7 +363,10 @@ def run_dpo(s3):
     lora_config = LoraConfig(
         r=lora_r,
         lora_alpha=lora_alpha,
-        target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+        target_modules=[
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
@@ -370,10 +376,12 @@ def run_dpo(s3):
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     samples_per_rank = max(1, len(dataset) // max(1, world_size))
-    min_steps_per_epoch = 2
-    grad_accum = max(1, samples_per_rank // (min_steps_per_epoch * batch_size))
+    # Target at least 4 optimizer steps per epoch so the model actually learns.
+    # With small DPO datasets, keep grad_accum low to maximize steps.
+    target_min_steps = 4
+    grad_accum = max(1, samples_per_rank // (target_min_steps * batch_size))
     grad_accum = min(grad_accum, 4)
-    est_steps = (samples_per_rank // (batch_size * grad_accum)) * num_epochs
+    est_steps = max(1, (samples_per_rank // (batch_size * grad_accum))) * num_epochs
     print(f"DPO scaling: world_size={world_size}, samples/rank={samples_per_rank}, "
           f"grad_accum={grad_accum}, est_optimizer_steps={est_steps}")
 

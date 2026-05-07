@@ -1,0 +1,109 @@
+# Canary Gateway -- FastAPI proxy with attribution + Istio sync
+# Deployment + Service + Route
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: canary-gateway
+  namespace: sridharproject
+  labels:
+    app: canary-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: canary-gateway
+  template:
+    metadata:
+      labels:
+        app: canary-gateway
+    spec:
+      serviceAccountName: canary-gateway-sa
+      containers:
+        - name: gateway
+          image: python:3.11-slim
+          command: ["bash", "-c"]
+          args:
+            - |
+              pip install --user -q fastapi uvicorn httpx kubernetes &&
+              cd /app && python -m uvicorn canary_gateway:app --host 0.0.0.0 --port 8090
+          ports:
+            - containerPort: 8090
+              name: http
+          env:
+            - name: TEACHER_URL
+              value: "http://ollama.sridharproject.svc.cluster.local:11434"
+            - name: STUDENT_URL
+              value: "http://code-review-llm-predictor.sridharproject.svc.cluster.local:80"
+            - name: TEACHER_MODEL
+              value: "qwen2.5-coder:32b-instruct-q4_K_M"
+            - name: NAMESPACE
+              value: "sridharproject"
+            - name: CONFIGMAP_NAME
+              value: "traffic-split"
+            - name: VIRTUALSERVICE_NAME
+              value: "code-review-gateway"
+            - name: HOME
+              value: "/tmp"
+            - name: PYTHONUSERBASE
+              value: "/tmp/.local"
+            - name: PATH
+              value: "/tmp/.local/bin:/usr/local/bin:/usr/bin:/bin"
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 40
+            periodSeconds: 30
+      volumes:
+        - name: app-code
+          configMap:
+            name: canary-gateway-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: canary-gateway
+  namespace: sridharproject
+  labels:
+    app: canary-gateway
+spec:
+  selector:
+    app: canary-gateway
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: canary-gateway
+  namespace: sridharproject
+  annotations:
+    haproxy.router.openshift.io/timeout: "120s"
+spec:
+  to:
+    kind: Service
+    name: canary-gateway
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
