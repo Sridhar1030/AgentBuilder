@@ -1,9 +1,9 @@
 """
-KFP Component 2 -- QLoRA Fine-Tune via PyTorchJob
+KFP Component -- QLoRA SFT Fine-Tune via Kubeflow TrainJob (Trainer v2)
 
-Creates a kubeflow.org/v1 PyTorchJob with torchrun for multi-GPU DDP training.
-The PyTorchJob controller properly handles distributed launch, unlike the
-TrainJob v1alpha1 runtime which overrides container entrypoints.
+Creates a trainer.kubeflow.org/v1alpha1 TrainJob that references the
+torch-distributed ClusterTrainingRuntime shipped with RHOAI.
+The runtime handles torchrun setup, MASTER_ADDR, NCCL, etc.
 """
 
 from kfp import dsl
@@ -26,11 +26,15 @@ def finetune(
     lora_r: int = 16,
     lora_alpha: int = 32,
 ) -> str:
-    """Create a PyTorchJob for multi-GPU QLoRA SFT training."""
+    """Create a TrainJob for multi-GPU QLoRA SFT training."""
     import time
 
     import boto3
     from kubernetes import client, config
+
+    TRAINJOB_GROUP = "trainer.kubeflow.org"
+    TRAINJOB_VERSION = "v1alpha1"
+    TRAINJOB_PLURAL = "trainjobs"
 
     config.load_incluster_config()
 
@@ -46,7 +50,7 @@ def finetune(
 
     namespace = "sridharproject"
     job_name = f"finetune-{int(time.time())}"
-    image = "image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.1.5"
+    image = "image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.2.0"
 
     # --- GPU evacuation and restore helpers ---
     isvc_deployment = "code-review-llm-predictor"
@@ -137,26 +141,24 @@ def finetune(
                 else:
                     print(f"[{time.strftime('%H:%M:%S')}]   -> Skipping (need 4 free GPUs, only {gpu_free})")
     except Exception as e:
-        print(f"[{time.strftime('%H:%M:%S')}] Could not query nodes ({e}), falling back to 2 nodes x 4 GPUs")
+        print(f"[{time.strftime('%H:%M:%S')}] Could not query nodes ({e}), falling back to 1 node x 4 GPUs")
         available_gpu_nodes = 2
         gpus_per_node_list = [4, 4]
 
     num_gpus_per_node = min(gpus_per_node_list) if gpus_per_node_list else 4
 
-    # Reserve 1 node as buffer for always-on services (Ollama, etc.)
     safe_gpu_nodes = max(1, available_gpu_nodes - 1)
     print(f"[{time.strftime('%H:%M:%S')}] Reserving 1 node buffer -> {safe_gpu_nodes} schedulable nodes")
 
-    num_workers = max(0, safe_gpu_nodes - 1)
     total_gpus = safe_gpu_nodes * num_gpus_per_node
     print(f"[{time.strftime('%H:%M:%S')}] GPU topology: {safe_gpu_nodes} usable nodes x {num_gpus_per_node} GPUs/node = {total_gpus} total")
 
     print("=" * 60)
-    print("SFT FINE-TUNE STEP (PyTorchJob, multi-node multi-GPU)")
+    print("SFT FINE-TUNE STEP (TrainJob v2, multi-node multi-GPU)")
     print("=" * 60)
     print(f"  Job name:     {job_name}")
     print(f"  Image:        {image}")
-    print(f"  Nodes:        1 Master + {num_workers} Workers = {safe_gpu_nodes} nodes")
+    print(f"  Nodes:        {safe_gpu_nodes}")
     print(f"  GPUs/node:    {num_gpus_per_node}")
     print(f"  Total GPUs:   {total_gpus}")
     print(f"  Base model:   {base_model_id}")
@@ -166,6 +168,7 @@ def finetune(
     print(f"  Batch size:   {batch_size}")
     print(f"  LR:           {learning_rate}")
     print(f"  LoRA r/alpha: {lora_r}/{lora_alpha}")
+    print(f"  Runtime:      torch-distributed (Trainer v2)")
     print("=" * 60)
 
     env_list = [
@@ -182,91 +185,53 @@ def finetune(
         {"name": "S3_SECRET_KEY", "value": s3_secret_key},
     ]
 
-    container_spec = {
-        "name": "pytorch",
-        "image": image,
-        "env": env_list,
-        "resources": {
-            "requests": {
-                "nvidia.com/gpu": str(num_gpus_per_node),
-                "memory": "48Gi",
-                "cpu": "8",
-            },
-            "limits": {
-                "nvidia.com/gpu": str(num_gpus_per_node),
-                "memory": "64Gi",
-                "cpu": "16",
-            },
-        },
-        "volumeMounts": [{"name": "dshm", "mountPath": "/dev/shm"}],
-    }
-
-    pod_spec = {
-        "volumes": [{"name": "dshm", "emptyDir": {"medium": "Memory", "sizeLimit": "8Gi"}}],
-    }
-
-    node_selector = {"nvidia.com/gpu.present": "true"}
-
-    torchrun_args = [
-        f"--nproc_per_node={num_gpus_per_node}",
-        "--master_port=29500",
-        "/opt/scripts/finetune_job.py",
-    ]
-
-    replica_specs = {
-        "Master": {
-            "replicas": 1,
-            "restartPolicy": "Never",
-            "template": {
-                "spec": {
-                    **pod_spec,
-                    "nodeSelector": node_selector,
-                    "containers": [{
-                        **container_spec,
-                        "command": ["torchrun"],
-                        "args": torchrun_args,
-                    }],
-                },
-            },
-        },
-    }
-    if num_workers > 0:
-        replica_specs["Worker"] = {
-            "replicas": num_workers,
-            "restartPolicy": "Never",
-            "template": {
-                "spec": {
-                    **pod_spec,
-                    "nodeSelector": node_selector,
-                    "containers": [{
-                        **container_spec,
-                        "command": ["torchrun"],
-                        "args": torchrun_args,
-                    }],
-                },
-            },
-        }
-
-    pytorchjob = {
-        "apiVersion": "kubeflow.org/v1",
-        "kind": "PyTorchJob",
+    trainjob = {
+        "apiVersion": f"{TRAINJOB_GROUP}/{TRAINJOB_VERSION}",
+        "kind": "TrainJob",
         "metadata": {"name": job_name, "namespace": namespace},
-        "spec": {"pytorchReplicaSpecs": replica_specs},
+        "spec": {
+            "runtimeRef": {"name": "torch-distributed"},
+            "trainer": {
+                "image": image,
+                "numNodes": safe_gpu_nodes,
+                "env": env_list,
+                "resourcesPerNode": {
+                    "requests": {
+                        "nvidia.com/gpu": str(num_gpus_per_node),
+                        "memory": "48Gi",
+                        "cpu": "8",
+                    },
+                    "limits": {
+                        "nvidia.com/gpu": str(num_gpus_per_node),
+                        "memory": "64Gi",
+                        "cpu": "16",
+                    },
+                },
+            },
+            "podTemplateOverrides": [{
+                "targetJobs": [{"name": "node"}],
+                "spec": {
+                    "nodeSelector": {"nvidia.com/gpu.present": "true"},
+                    "volumes": [{"name": "dshm", "emptyDir": {"medium": "Memory", "sizeLimit": "8Gi"}}],
+                    "containers": [{"name": "node", "volumeMounts": [{"name": "dshm", "mountPath": "/dev/shm"}]}],
+                },
+            }],
+        },
     }
 
     custom_api.create_namespaced_custom_object(
-        group="kubeflow.org",
-        version="v1",
+        group=TRAINJOB_GROUP,
+        version=TRAINJOB_VERSION,
         namespace=namespace,
-        plural="pytorchjobs",
-        body=pytorchjob,
+        plural=TRAINJOB_PLURAL,
+        body=trainjob,
     )
 
     poll_interval = 30
     timeout = 36000
     elapsed = 0
 
-    print(f"[{time.strftime('%H:%M:%S')}] Submitted PyTorchJob {job_name} ({available_gpu_nodes} nodes x {num_gpus_per_node} GPUs = {total_gpus} total)")
+    print(f"[{time.strftime('%H:%M:%S')}] Submitted TrainJob {job_name} ({safe_gpu_nodes} nodes x {num_gpus_per_node} GPUs = {total_gpus} total)")
     print(f"[{time.strftime('%H:%M:%S')}] Timeout set to {timeout}s ({timeout/3600:.1f}h)")
 
     def _model_s3_timestamp():
@@ -304,8 +269,8 @@ def finetune(
                 print(f"[{time.strftime('%H:%M:%S')}] SFT model updated in S3 (job status={status}, elapsed={hrs}h{mins}m). Success.")
                 try:
                     custom_api.delete_namespaced_custom_object(
-                        group="kubeflow.org", version="v1", namespace=namespace,
-                        plural="pytorchjobs", name=job_name,
+                        group=TRAINJOB_GROUP, version=TRAINJOB_VERSION,
+                        namespace=namespace, plural=TRAINJOB_PLURAL, name=job_name,
                     )
                 except Exception:
                     pass
@@ -318,8 +283,8 @@ def finetune(
 
             try:
                 job = custom_api.get_namespaced_custom_object(
-                    group="kubeflow.org", version="v1", namespace=namespace,
-                    plural="pytorchjobs", name=job_name,
+                    group=TRAINJOB_GROUP, version=TRAINJOB_VERSION,
+                    namespace=namespace, plural=TRAINJOB_PLURAL, name=job_name,
                 )
             except Exception as e:
                 print(f"[{time.strftime('%H:%M:%S')}] Could not fetch job status ({e}), will retry...")
@@ -328,10 +293,10 @@ def finetune(
             conditions = job.get("status", {}).get("conditions", [])
             for c in conditions:
                 ctype = c.get("type")
-                if ctype == "Succeeded" and c.get("status") == "True":
+                if ctype == "Complete" and c.get("status") == "True":
                     hrs, rem = divmod(elapsed, 3600)
                     mins = rem // 60
-                    print(f"[{time.strftime('%H:%M:%S')}] PyTorchJob {job_name} succeeded ({hrs}h{mins}m)")
+                    print(f"[{time.strftime('%H:%M:%S')}] TrainJob {job_name} completed ({hrs}h{mins}m)")
                     result = model_output_s3_path
                     return result
                 if ctype == "Failed" and c.get("status") == "True":
@@ -343,13 +308,13 @@ def finetune(
             if not job_failed:
                 hrs, rem = divmod(elapsed, 3600)
                 mins = rem // 60
-                print(f"[{time.strftime('%H:%M:%S')}] PyTorchJob {job_name} running (elapsed={hrs}h{mins}m)")
+                print(f"[{time.strftime('%H:%M:%S')}] TrainJob {job_name} running (elapsed={hrs}h{mins}m)")
 
         if job_failed:
             try:
                 pods = core_api.list_namespaced_pod(
                     namespace=namespace,
-                    label_selector=f"training.kubeflow.org/job-name={job_name}",
+                    label_selector=f"batch.kubernetes.io/job-name={job_name}-node-0",
                 )
                 if pods.items:
                     pod_name = pods.items[0].metadata.name
@@ -359,9 +324,9 @@ def finetune(
                     fail_msg = f"{fail_msg}\n\n--- Pod {pod_name} logs ---\n{logs}"
             except Exception as e:
                 fail_msg = f"{fail_msg} (could not fetch pod logs: {e})"
-            raise RuntimeError(f"PyTorchJob {job_name} failed and model never appeared in S3: {fail_msg}")
+            raise RuntimeError(f"TrainJob {job_name} failed and model never appeared in S3: {fail_msg}")
 
-        raise TimeoutError(f"PyTorchJob {job_name} did not complete within {timeout}s")
+        raise TimeoutError(f"TrainJob {job_name} did not complete within {timeout}s")
     finally:
         print(f"[{time.strftime('%H:%M:%S')}] SFT step done. Restoring KServe student model...")
         _restore_kserve()
