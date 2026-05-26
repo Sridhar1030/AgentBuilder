@@ -18,7 +18,6 @@ from kfp import dsl
 def dpo_finetune(
     sft_model_s3_path: str,
     pref_data_s3_path: str,
-    model_version: str,
     s3_endpoint: str,
     s3_access_key: str,
     s3_secret_key: str,
@@ -41,12 +40,9 @@ def dpo_finetune(
     TRAINJOB_VERSION = "v1alpha1"
     TRAINJOB_PLURAL = "trainjobs"
 
-    print("=" * 60)
-    print("DPO FINE-TUNE STEP (TrainJob v2, single-node multi-GPU)")
-    print("=" * 60)
+    print(f"--- DPO FINE-TUNE STEP (TrainJob v2, single-node multi-GPU) ---")
     print(f"  SFT model:    {sft_model_s3_path}")
     print(f"  Pref data:    {pref_data_s3_path}")
-    print(f"  Version:      {model_version}")
     print(f"  Epochs:       {num_epochs}")
     print(f"  Batch size:   {batch_size}")
     print(f"  LR:           {learning_rate}")
@@ -83,7 +79,7 @@ def dpo_finetune(
 
     namespace = "sridharproject"
     job_name = f"dpo-{int(time.time())}"
-    image = "image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.2.0"
+    image = "image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.3.5"
 
     # --- GPU evacuation and restore helpers ---
     isvc_deployment = "code-review-llm-predictor"

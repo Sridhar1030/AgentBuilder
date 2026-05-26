@@ -41,38 +41,10 @@ from components.deploy_model import deploy_model
 from components.evaluate import evaluate
 from components.quality_gate import quality_gate
 from components.eval_optimize import eval_optimize
+from config import load_config
 
 
-def _load_config():
-    """Load distill.config.yaml and resolve {{namespace}} templates."""
-    try:
-        import yaml
-    except ImportError:
-        import subprocess, sys
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "pyyaml", "-q"])
-        import yaml
-
-    config_path = Path(__file__).resolve().parent.parent / "distill.config.yaml"
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config not found: {config_path}")
-
-    with open(config_path) as f:
-        cfg = yaml.safe_load(f)
-
-    ns = cfg["cluster"]["namespace"]
-    def _resolve(val):
-        if isinstance(val, str):
-            return val.replace("{{namespace}}", ns)
-        return val
-
-    for section in cfg.values():
-        if isinstance(section, dict):
-            for k, v in section.items():
-                section[k] = _resolve(v)
-    return cfg
-
-
-_CFG = _load_config()
+_CFG = load_config()
 
 # -- Cluster config (from distill.config.yaml) --------------------------------
 NAMESPACE = _CFG["cluster"]["namespace"]
@@ -279,7 +251,6 @@ def code_review_pipeline(
     dpo_task = dpo_finetune(
         sft_model_s3_path=sft_task.output,
         pref_data_s3_path=merge_task.output,
-        model_version=version_task.outputs["version"],
         s3_endpoint=S3_ENDPOINT,
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,

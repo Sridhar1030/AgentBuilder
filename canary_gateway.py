@@ -27,10 +27,12 @@ import os
 import random
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 app = FastAPI(title="Canary Gateway", version="1.0.0")
 logger = logging.getLogger("canary_gateway")
@@ -177,6 +179,13 @@ def _pick_backend() -> str:
     )[0]
 
 
+class SplitUpdateRequest(BaseModel):
+    teacher: int = 90
+    student: int = 10
+    last_student_score: Optional[float] = None
+    reason: str = "manual"
+
+
 @app.on_event("startup")
 async def startup():
     _load_state_from_configmap()
@@ -199,10 +208,9 @@ async def get_split():
 
 
 @app.post("/split")
-async def set_split(request: Request):
-    body = await request.json()
-    teacher = int(body.get("teacher", _state["teacher_weight"]))
-    student = int(body.get("student", _state["student_weight"]))
+async def set_split(body: SplitUpdateRequest):
+    teacher = body.teacher
+    student = body.student
 
     if teacher + student != 100:
         return JSONResponse(
@@ -215,14 +223,14 @@ async def set_split(request: Request):
     _state["teacher_weight"] = teacher
     _state["student_weight"] = student
 
-    if "last_student_score" in body:
-        _state["last_student_score"] = float(body["last_student_score"])
+    if body.last_student_score is not None:
+        _state["last_student_score"] = body.last_student_score
 
     _state["shift_history"].append({
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "from": {"teacher": old_teacher, "student": old_student},
         "to": {"teacher": teacher, "student": student},
-        "reason": body.get("reason", "manual"),
+        "reason": body.reason,
     })
 
     _sync_all()

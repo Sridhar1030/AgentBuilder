@@ -70,17 +70,60 @@ def build_instruction(row: dict) -> str:
 
 
 def build_response(row: dict) -> str:
-    """Build the assistant response from a data record."""
     return row.get("reviewer_comment", "").strip()
 
 
 def format_chatml(instruction: str, response: str) -> str:
-    """Format as ChatML text for SFT training."""
     return (
         f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
         f"<|im_start|>user\n{instruction}<|im_end|>\n"
         f"<|im_start|>assistant\n{response}<|im_end|>"
     )
+
+
+def _extract_expected_issues(row: dict) -> list[str]:
+    """Heuristically extract expected issues from reviewer comments for GRPO rewards."""
+    comment = row.get("reviewer_comment", "").lower()
+    if not comment:
+        return []
+
+    issue_keywords = {
+        "error": ["error", "err", "exception"],
+        "nil": ["nil", "null", "none", "undefined"],
+        "close": ["close", "defer", "resource leak", "file handle"],
+        "context": ["context", "ctx", "cancel", "timeout"],
+        "security": ["injection", "sanitize", "escape", "xss", "auth", "token"],
+        "race": ["race", "concurrent", "mutex", "lock", "goroutine"],
+        "memory": ["memory", "leak", "allocation", "gc"],
+        "performance": ["performance", "cache", "O(n", "expensive", "slow"],
+        "validation": ["validate", "check", "verify", "assert", "boundary"],
+        "type": ["type", "cast", "conversion", "assertion"],
+    }
+
+    found = []
+    for category, keywords in issue_keywords.items():
+        if any(kw in comment for kw in keywords):
+            found.append(category)
+    return found[:4]
+
+
+def _infer_category(row: dict) -> str:
+    """Infer the review category from language and comment content."""
+    comment = row.get("reviewer_comment", "").lower()
+    language = row.get("language", "").lower()
+    file_path = row.get("file_path", "").lower()
+
+    if any(w in comment for w in ["inject", "auth", "token", "sanitiz", "xss", "vulnerability"]):
+        return "security"
+    if any(w in comment for w in ["performance", "cache", "expensive", "O(n", "slow", "informer"]):
+        return "performance"
+    if any(w in file_path for w in [".yaml", ".yml", "kustomiz", "manifest", "helm"]):
+        return "kubernetes"
+    if any(w in comment for w in ["race", "deadlock", "timeout", "retry", "resilien"]):
+        return "reliability"
+    if any(w in comment for w in ["style", "naming", "convention", "comment", "readab"]):
+        return "style"
+    return "bug"
 
 
 def load_data(path: str) -> list[dict]:
@@ -163,27 +206,59 @@ def main(args):
     types = Counter(r.get("comment_type", "?") for r in all_data)
     print(f"By comment_type: {dict(types)}")
 
-    # Build diff-bank.json (50 held-out diffs for evaluation)
+    # Build diff-bank.json with enriched metadata for GRPO training
     if args.diff_bank:
-        print(f"\nBuilding diff-bank.json...")
+        print(f"\nBuilding diff-bank.json (enriched with GRPO metadata)...")
         positive_data = [r for r in mined + hf if not r.get("is_negative")]
+        negative_data = [r for r in mined + hf if r.get("is_negative")]
         random.shuffle(positive_data)
+        random.shuffle(negative_data)
 
-        # Pick 30 from mined, 20 from HF (or whatever's available)
-        mined_eval = [r for r in positive_data if r.get("_source") == "github_mined"][:30]
-        hf_eval = [r for r in positive_data if r.get("_source") == "hf_supplement"][:20]
-        eval_diffs = mined_eval + hf_eval
+        target_count = args.diff_bank_size
+        mined_eval = [r for r in positive_data if r.get("_source") == "github_mined"]
+        hf_eval = [r for r in positive_data if r.get("_source") == "hf_supplement"]
 
-        diff_bank = {
-            "all_questions": [build_instruction(r) for r in eval_diffs]
-        }
+        mined_take = min(len(mined_eval), int(target_count * 0.5))
+        hf_take = min(len(hf_eval), int(target_count * 0.3))
+        clean_take = min(len(negative_data), int(target_count * 0.2))
+
+        eval_diffs = mined_eval[:mined_take] + hf_eval[:hf_take]
+
+        enriched_entries = []
+        for r in eval_diffs:
+            entry = {
+                "question": build_instruction(r),
+                "has_bug": True,
+                "expected_issues": _extract_expected_issues(r),
+                "category": _infer_category(r),
+            }
+            enriched_entries.append(entry)
+
+        for r in negative_data[:clean_take]:
+            entry = {
+                "question": build_instruction(r),
+                "has_bug": False,
+                "expected_issues": [],
+                "category": "clean",
+            }
+            enriched_entries.append(entry)
+
+        random.shuffle(enriched_entries)
+
+        diff_bank = {"all_questions": enriched_entries}
 
         db_path = Path(args.diff_bank)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with open(db_path, "w") as f:
             json.dump(diff_bank, f, indent=2)
-        print(f"Diff bank written: {db_path} ({len(eval_diffs)} diffs)")
-        print(f"  From mined: {len(mined_eval)}, from HF: {len(hf_eval)}")
+
+        has_bug_count = sum(1 for e in enriched_entries if e["has_bug"])
+        has_issues = sum(1 for e in enriched_entries if e["expected_issues"])
+        cats = Counter(e["category"] for e in enriched_entries)
+        print(f"Diff bank written: {db_path} ({len(enriched_entries)} diffs)")
+        print(f"  has_bug=True: {has_bug_count}, has_bug=False: {len(enriched_entries) - has_bug_count}")
+        print(f"  With expected_issues: {has_issues}")
+        print(f"  Categories: {dict(cats)}")
 
     # Upload to MinIO
     if args.upload:
@@ -212,6 +287,8 @@ if __name__ == "__main__":
     parser.add_argument("--hf-supplement", default="data/hf_supplement.json")
     parser.add_argument("--output", "-o", default="data/code_review_train.jsonl")
     parser.add_argument("--diff-bank", default="data/diff-bank.json")
+    parser.add_argument("--diff-bank-size", type=int, default=200,
+                        help="Target number of diffs in the diff-bank (default: 200)")
     parser.add_argument("--upload", action="store_true", help="Upload to MinIO after formatting")
     parser.add_argument("--s3-endpoint", default="http://minio.sridharproject.svc.cluster.local:9000")
     parser.add_argument("--s3-access-key", default="minioadmin")
