@@ -15,6 +15,7 @@ VersionOutputs = NamedTuple(
         ("gold_data_path", str),
         ("model_output_path", str),
         ("dpo_model_output_path", str),
+        ("grpo_model_output_path", str),
         ("prev_model_path", str),
     ],
 )
@@ -33,7 +34,17 @@ def resolve_version(
     gold_bucket: str,
     hf_base_model_id: str = "Qwen/Qwen2.5-Coder-1.5B-Instruct",
     explicit_version: str = "",
-) -> NamedTuple("VersionOutputs", [("version", str), ("gold_data_path", str), ("model_output_path", str), ("dpo_model_output_path", str), ("prev_model_path", str)]):
+) -> NamedTuple(
+    "VersionOutputs",
+    [
+        ("version", str),
+        ("gold_data_path", str),
+        ("model_output_path", str),
+        ("dpo_model_output_path", str),
+        ("grpo_model_output_path", str),
+        ("prev_model_path", str),
+    ],
+):
     """Find the latest student-1b-vN/ in MinIO and return vN+1 with paths."""
     import re
     from collections import namedtuple
@@ -110,12 +121,27 @@ def resolve_version(
     gold_data_path = f"s3://{gold_bucket}/gold/train-{version}.jsonl"
     model_output_path = f"s3://{model_bucket}/{model_prefix}{version}/"
     dpo_model_output_path = f"s3://{model_bucket}/{model_prefix}{version}-dpo/"
+    grpo_model_output_path = f"s3://{model_bucket}/{model_prefix}{version}-grpo/"
 
     print(f"Version: {version}")
     print(f"Gold data path: {gold_data_path}")
     print(f"Model output path (SFT): {model_output_path}")
     print(f"Model output path (DPO): {dpo_model_output_path}")
+    print(f"Model output path (GRPO): {grpo_model_output_path}")
     print(f"Prev model path: {prev_model_path or '(none)'}")
 
-    Outputs = namedtuple("VersionOutputs", ["version", "gold_data_path", "model_output_path", "dpo_model_output_path", "prev_model_path"])
-    return Outputs(version=version, gold_data_path=gold_data_path, model_output_path=model_output_path, dpo_model_output_path=dpo_model_output_path, prev_model_path=prev_model_path)
+    Outputs = namedtuple(
+        "VersionOutputs",
+        [
+            "version", "gold_data_path", "model_output_path",
+            "dpo_model_output_path", "grpo_model_output_path", "prev_model_path",
+        ],
+    )
+    return Outputs(
+        version=version,
+        gold_data_path=gold_data_path,
+        model_output_path=model_output_path,
+        dpo_model_output_path=dpo_model_output_path,
+        grpo_model_output_path=grpo_model_output_path,
+        prev_model_path=prev_model_path,
+    )

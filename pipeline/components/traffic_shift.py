@@ -32,7 +32,6 @@ def traffic_shift(
 
     Returns dict with shift decision, old/new split, and scores.
     """
-    import json
     import os
     import sys
     import requests

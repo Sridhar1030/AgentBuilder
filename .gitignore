@@ -83,6 +83,9 @@ venv311/
 mlflow.db
 taskDone.txtextension/
 
+# —— Desloppify (local state, not committed) ——————————————————————
+.desloppify/
+
 # —— Docs, plans & knowledge bases ————————————————————————————————
 docs/
 images/

@@ -27,7 +27,6 @@ def eval_analyze(
 
     This is the /eval-analyze step from agent-eval-harness.
     """
-    import json
     import os
     import sys
     import mlflow

@@ -27,7 +27,6 @@ Upload via RHOAI Dashboard or:
 """
 
 import json
-import os
 from pathlib import Path
 
 from kfp import dsl, compiler

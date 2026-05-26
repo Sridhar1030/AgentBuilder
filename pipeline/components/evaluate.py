@@ -60,7 +60,6 @@ def evaluate(
     from pathlib import Path
     import requests
     import mlflow
-    import yaml
 
     sys.stdout.reconfigure(line_buffering=True)
 

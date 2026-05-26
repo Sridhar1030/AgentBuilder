@@ -83,6 +83,21 @@ training:
   static_bank_sample_size: 300
   sft_mix_ratio: 0.15
 
+# -- GRPO CONFIG --------------------------------------------------------------
+# Third training stage after DPO: online RL with verifiable reward functions.
+grpo:
+  num_generations: 2
+  learning_rate: 5.0e-7
+  num_epochs: 1
+  beta: 0.0
+  temperature: 0.7
+  min_prompts: 10
+  max_completion_length: 256
+  loss_type: grpo
+  reward_weights: [2.0, 0.8, 0.3]
+  diff_bank_path: "s3://mlflow-artifacts/synthetic/code-review/diff-bank.json"
+  use_vllm: false
+
 # -- CANARY CONFIG ------------------------------------------------------------
 # Progressive traffic splitting between Teacher and Student.
 # The canary gateway routes requests, adds model attribution, and syncs
