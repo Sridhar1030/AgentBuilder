@@ -6,7 +6,7 @@ All configuration is read from environment variables so it can be
 driven by the TrainJob spec without code changes.
 
 Environment Variables:
-    TRAINING_MODE           "sft" (default) or "dpo"
+    TRAINING_MODE           "sft" (default), "dpo", or "grpo"
     GOLD_DATA_PATH          S3 path to the gold training JSONL (SFT mode)
     PREF_DATA_PATH          S3 path to preference JSONL (DPO mode)
     MODEL_OUTPUT_S3_PATH    S3 destination for the merged model
@@ -426,37 +426,9 @@ def run_dpo(s3):
 
     if is_main_process():
         output_dir = "/tmp/student-dpo-merged"
-        print("Saving DPO adapter and merging...")
-        trainer.save_model("/tmp/dpo-adapter")
-
+        merge_and_save(trainer.model, local_model_id, output_dir)
         del trainer
         torch.cuda.empty_cache()
-
-        base_model = AutoModelForCausalLM.from_pretrained(
-            local_model_id,
-            torch_dtype=torch.float16,
-            device_map="cpu",
-        )
-        peft_model = PeftModel.from_pretrained(base_model, "/tmp/dpo-adapter")
-        merged_model = peft_model.merge_and_unload()
-        print("DPO LoRA merged into full-precision model")
-        merged_model.save_pretrained(output_dir)
-
-        clean_tokenizer = AutoTokenizer.from_pretrained(local_model_id)
-        clean_tokenizer.save_pretrained(output_dir)
-
-        tc_path = os.path.join(output_dir, "tokenizer_config.json")
-        with open(tc_path, "r") as f:
-            tc = json.load(f)
-        removed = []
-        for field in ["tokenizer_class", "auto_map"]:
-            if field in tc:
-                removed.append(f"{field}={tc.pop(field)}")
-        if removed:
-            with open(tc_path, "w") as f:
-                json.dump(tc, f, indent=2)
-            print(f"Patched tokenizer_config.json: removed {removed}")
-
         upload_model_to_s3(s3, output_dir, model_output_s3_path)
     else:
         print(f"[Rank {local_rank()}] DPO done. Waiting for rank 0 to merge & upload.")
@@ -464,6 +436,340 @@ def run_dpo(s3):
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
         print(f"[Rank {local_rank()}] All ranks synced. Clean exit.")
+        os._exit(0)
+
+
+# =========================================================================
+# GRPO Training
+# =========================================================================
+
+FILLER_PHRASES = [
+    "let me analyze",
+    "let's examine",
+    "here is my review",
+    "i will now review",
+    "upon careful examination",
+    "after thorough analysis",
+    "in this code review",
+    "overall, the changes",
+    "in summary, ",
+    "to summarize, ",
+]
+
+FALSE_POSITIVE_PHRASES = [
+    "vulnerability", "injection", "exploit",
+    "critical bug", "serious issue", "major flaw",
+    "security risk", "memory leak", "race condition",
+    "must be fixed", "needs to be fixed", "should be fixed immediately",
+]
+
+LGTM_PHRASES = [
+    "lgtm", "looks good to me", "no issues found",
+    "code looks clean", "no problems", "no concerns",
+]
+
+
+def _completion_text(completion) -> str:
+    """Extract plain text from a TRL completion (str or chat messages)."""
+    if isinstance(completion, str):
+        return completion
+    if isinstance(completion, list):
+        for msg in reversed(completion):
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                return msg.get("content", "")
+        if completion and isinstance(completion[0], dict):
+            return completion[0].get("content", "")
+    return str(completion)
+
+
+def correctness_reward(completions, has_bug, expected_issues, **kwargs):
+    """Verifiable correctness reward aligned with eval.yaml correctness judge."""
+    rewards = []
+    for completion, bug, issues in zip(completions, has_bug, expected_issues):
+        review = _completion_text(completion).lower()
+        if not review.strip():
+            rewards.append(0.0)
+            continue
+        bug_val = bug if isinstance(bug, bool) else str(bug).lower() in ("true", "1", "yes")
+        if bug_val:
+            if any(p in review for p in LGTM_PHRASES):
+                rewards.append(0.0)
+                continue
+            issue_list = issues if isinstance(issues, list) else []
+            if issue_list:
+                matched = 0
+                for issue in issue_list:
+                    keywords = [w.lower() for w in str(issue).split() if len(w) > 3][:4]
+                    if any(kw in review for kw in keywords):
+                        matched += 1
+                rewards.append(min(1.0, matched / max(len(issue_list), 1)))
+            else:
+                rewards.append(0.5)
+        else:
+            if any(p in review for p in FALSE_POSITIVE_PHRASES):
+                rewards.append(0.0)
+            else:
+                rewards.append(1.0)
+    return rewards
+
+
+def format_reward(completions, **kwargs):
+    """Penalize boilerplate filler phrases (eval.yaml format_check)."""
+    rewards = []
+    for completion in completions:
+        review = _completion_text(completion).lower()
+        if not review.strip():
+            rewards.append(0.0)
+            continue
+        found = [p for p in FILLER_PHRASES if p in review]
+        if len(found) >= 2:
+            rewards.append(0.0)
+        elif len(found) == 1:
+            rewards.append(0.5)
+        else:
+            rewards.append(1.0)
+    return rewards
+
+
+def conciseness_reward(completions, **kwargs):
+    """Reward concise reviews: 1.0 at <=150 words, linear decay to 0 at 400 words."""
+    rewards = []
+    for completion in completions:
+        review = _completion_text(completion)
+        if not review.strip():
+            rewards.append(0.0)
+            continue
+        word_count = len(review.split())
+        if word_count <= 150:
+            rewards.append(1.0)
+        elif word_count >= 400:
+            rewards.append(0.0)
+        else:
+            rewards.append(max(0.0, 1.0 - (word_count - 150) / 250.0))
+    return rewards
+
+
+def _format_grpo_prompt(prompt_text: str, system_prompt: str) -> list[dict]:
+    """Build chat messages for GRPO from a plain-text review prompt."""
+    if system_prompt:
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt_text},
+        ]
+    return [{"role": "user", "content": prompt_text}]
+
+
+def run_grpo(s3):
+    import subprocess
+    import sys
+
+    use_vllm = os.environ.get("USE_VLLM", "0") == "1"
+    if use_vllm:
+        print("Installing vLLM for fast GRPO generation...")
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--no-cache-dir", "vllm>=0.6.0", "-q"],
+        )
+
+    from trl import GRPOConfig, GRPOTrainer
+
+    grpo_data_path = get_env("GRPO_DATA_PATH")
+    model_output_s3_path = get_env("MODEL_OUTPUT_S3_PATH")
+    base_model_id = get_env("BASE_MODEL_ID")
+    num_epochs = int(get_env("NUM_EPOCHS", "1"))
+    batch_size = int(get_env("BATCH_SIZE", "1"))
+    learning_rate = float(get_env("LEARNING_RATE", "5e-7"))
+    lora_r = int(get_env("LORA_R", "16"))
+    lora_alpha = int(get_env("LORA_ALPHA", "32"))
+    num_generations = int(get_env("NUM_GENERATIONS", "4"))
+    grpo_beta = float(get_env("GRPO_BETA", "0.0"))
+    max_completion_length = int(get_env("MAX_COMPLETION_LENGTH", "512"))
+    loss_type = get_env("GRPO_LOSS_TYPE", "grpo")
+    temperature = float(get_env("GRPO_TEMPERATURE", "0.7"))
+    system_prompt = os.environ.get("GRPO_SYSTEM_PROMPT", "")
+
+    weak_categories_raw = os.environ.get("GRPO_WEAK_CATEGORIES", "")
+    weak_cats = set()
+    if weak_categories_raw:
+        try:
+            parsed = json.loads(weak_categories_raw)
+            if isinstance(parsed, list):
+                for wc in parsed:
+                    cat = wc.lower().replace("_correctness", "").replace("_conciseness", "")
+                    cat = cat.lstrip("q0123456789_")
+                    if cat:
+                        weak_cats.add(cat)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    records = load_s3_jsonl(s3, grpo_data_path)
+    if not records:
+        print("No GRPO training data found -- skipping GRPO")
+        return
+
+    formatted = []
+    weak_count = 0
+    for r in records:
+        prompt_text = r.get("prompt", "")
+        if not prompt_text:
+            continue
+        entry = {
+            "prompt": _format_grpo_prompt(prompt_text, system_prompt),
+            "has_bug": r.get("has_bug", True),
+            "expected_issues": r.get("expected_issues", []),
+            "category": r.get("category", ""),
+        }
+        formatted.append(entry)
+
+        cat = r.get("category", "").lower()
+        is_weak = cat in weak_cats or any(wc in cat for wc in weak_cats)
+        if is_weak:
+            formatted.append(dict(entry))
+            formatted.append(dict(entry))
+            weak_count += 1
+
+    if weak_cats:
+        print(f"Curriculum: weak categories = {weak_cats}, upweighted {weak_count} prompts (3x)")
+    else:
+        print("Curriculum: no weak categories provided, uniform sampling")
+
+    dataset = Dataset.from_list(formatted)
+    print(f"Loaded {len(dataset)} GRPO prompts from {grpo_data_path} (after curriculum expansion)")
+
+    local_model_id = base_model_id
+    if base_model_id.startswith("s3://"):
+        local_model_id = "/tmp/dpo-model"
+        marker = os.path.join(local_model_id, ".download_done")
+        if local_rank() == 0:
+            if os.path.exists(local_model_id):
+                shutil.rmtree(local_model_id)
+            os.makedirs(local_model_id, exist_ok=True)
+            print(f"Downloading DPO model from {base_model_id} (GRPO base)...")
+            download_s3_dir(s3, base_model_id, local_model_id)
+            with open(marker, "w") as f:
+                f.write("ok")
+        else:
+            while not os.path.exists(marker):
+                time.sleep(2)
+
+    print(f"Loading model for GRPO: {local_model_id}")
+    rank = local_rank()
+    tokenizer = AutoTokenizer.from_pretrained(local_model_id)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    tokenizer.model_max_length = 1024
+
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    use_qlora = world_size == 1
+
+    if use_qlora:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            local_model_id,
+            quantization_config=bnb_config,
+            device_map={"": rank},
+        )
+        model = prepare_model_for_kbit_training(model)
+        lora_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            target_modules=[
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+            ],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, lora_config)
+        print(f"[Rank {rank}] GRPO model loaded with QLoRA (single-node, memory-efficient)")
+    else:
+        if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+            dtype = torch.bfloat16
+        elif torch.cuda.is_available():
+            dtype = torch.float16
+        else:
+            dtype = torch.float32
+        model = AutoModelForCausalLM.from_pretrained(
+            local_model_id, torch_dtype=dtype,
+        )
+        if torch.cuda.is_available():
+            model = model.to(torch.device(f"cuda:{rank}"))
+        print(f"[Rank {rank}] GRPO model loaded in {dtype} (full precision, multi-node)")
+
+    setup_mlflow("grpo")
+
+    grad_accum = max(1, 4 // max(1, batch_size))
+    effective_batch = max(1, world_size * batch_size * grad_accum)
+    if effective_batch % num_generations != 0:
+        grad_accum = max(1, grad_accum)
+        while (world_size * batch_size * grad_accum) % num_generations != 0 and grad_accum < 16:
+            grad_accum += 1
+
+    reward_weights = [2.0, 0.8, 0.3]
+
+    grpo_args = GRPOConfig(
+        output_dir="/tmp/grpo-checkpoints",
+        num_train_epochs=num_epochs,
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=grad_accum,
+        learning_rate=learning_rate,
+        beta=grpo_beta,
+        num_generations=num_generations,
+        max_completion_length=max_completion_length,
+        max_prompt_length=512,
+        loss_type=loss_type,
+        temperature=temperature,
+        reward_weights=reward_weights,
+        fp16=bool(use_qlora and torch.cuda.is_available()),
+        bf16=bool(not use_qlora and torch.cuda.is_available() and torch.cuda.is_bf16_supported()),
+        logging_steps=1,
+        save_strategy="epoch",
+        warmup_ratio=0.1,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        ddp_find_unused_parameters=False,
+        use_vllm=use_vllm,
+        report_to=["mlflow"],
+        run_name=f"grpo-g{num_generations}-{num_epochs}ep",
+    )
+
+    trainer = GRPOTrainer(
+        model=model,
+        args=grpo_args,
+        train_dataset=dataset,
+        processing_class=tokenizer,
+        reward_funcs=[correctness_reward, format_reward, conciseness_reward],
+    )
+
+    print(
+        f"Starting GRPO training (generations={num_generations}, beta={grpo_beta}, "
+        f"use_vllm={use_vllm})..."
+    )
+    trainer.train()
+
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+    if is_main_process():
+        output_dir = "/tmp/student-grpo-merged"
+        os.makedirs(output_dir, exist_ok=True)
+        if use_qlora:
+            merge_and_save(model, local_model_id, output_dir)
+        else:
+            model.save_pretrained(output_dir)
+            tokenizer.save_pretrained(output_dir)
+            print("GRPO model saved (full precision, no merge needed)")
+        upload_model_to_s3(s3, output_dir, model_output_s3_path)
+    else:
+        print(f"[Rank {local_rank()}] GRPO done. Waiting for rank 0 to merge & upload.")
+
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
         os._exit(0)
 
 
@@ -481,6 +787,8 @@ def main():
 
     if training_mode == "dpo":
         run_dpo(s3)
+    elif training_mode == "grpo":
+        run_grpo(s3)
     else:
         run_sft(s3)
 

@@ -35,6 +35,7 @@ from components.eval_optimize import eval_optimize
 from components.eval_analyze import eval_analyze
 from components.eval_dataset import eval_dataset
 from components.traffic_shift import traffic_shift
+from components.extract_gold import extract_code_review_gold
 from config import load_config
 
 
@@ -80,70 +81,6 @@ def _extract_weak_categories(analysis: dict) -> str:
     import json
     cats = analysis.get("weak_categories", [])
     return json.dumps(cats)
-
-
-# -- Extract gold data component -----------------------------------------------
-
-@dsl.component(
-    base_image="python:3.11-slim",
-    packages_to_install=["boto3"],
-)
-def extract_code_review_gold(
-    s3_endpoint: str,
-    s3_access_key: str,
-    s3_secret_key: str,
-    synthetic_bucket: str,
-    synthetic_prefix: str,
-    output_s3_path: str,
-) -> str:
-    """Read pre-built code review training JSONL from MinIO."""
-    import json
-    import random
-    import boto3
-
-    print("=" * 60)
-    print("EXTRACT CODE REVIEW GOLD DATA STEP")
-    print("=" * 60)
-
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=s3_endpoint,
-        aws_access_key_id=s3_access_key,
-        aws_secret_access_key=s3_secret_key,
-    )
-
-    records = []
-    paginator = s3.get_paginator("list_objects_v2")
-
-    for page in paginator.paginate(Bucket=synthetic_bucket, Prefix=synthetic_prefix):
-        for item in page.get("Contents", []):
-            key = item["Key"]
-            if not key.endswith(".jsonl"):
-                continue
-            try:
-                body = s3.get_object(Bucket=synthetic_bucket, Key=key)["Body"].read().decode("utf-8")
-                for line in body.strip().splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    record = json.loads(line)
-                    if not record.get("text"):
-                        continue
-                    records.append(record)
-            except Exception as exc:
-                print(f"Warning: skipping {key}: {exc}")
-
-    print(f"Loaded {len(records)} training records")
-    if len(records) > 1:
-        random.shuffle(records)
-
-    out_parts = output_s3_path.replace("s3://", "").split("/", 1)
-    out_bucket, out_key = out_parts[0], out_parts[1]
-    body = "\n".join(json.dumps(r) for r in records)
-    s3.put_object(Bucket=out_bucket, Key=out_key, Body=body.encode())
-    print(f"Uploaded {len(records)} gold records to {output_s3_path}")
-
-    return output_s3_path
 
 
 # ==============================================================================
