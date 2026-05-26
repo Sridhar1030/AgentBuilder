@@ -270,8 +270,8 @@ def finetune(
                         group=TRAINJOB_GROUP, version=TRAINJOB_VERSION,
                         namespace=namespace, plural=TRAINJOB_PLURAL, name=job_name,
                     )
-                except Exception:
-                    pass
+                except Exception as cleanup_err:
+                    print(f"[{time.strftime('%H:%M:%S')}] TrainJob cleanup skipped: {cleanup_err}")
                 result = model_output_s3_path
                 return result
 

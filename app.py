@@ -1,11 +1,13 @@
+import logging
 import os
 import re
 import json
 import time
 import uuid
 import warnings
-import traceback
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -163,7 +165,7 @@ def chat(message: str, model_choice: str):
         try:
             log_training_pair(message, reply)
         except Exception as exc:
-            traceback.print_exc()
+            logger.exception("Failed to log training pair to MinIO")
             reply += f"\n\n_(Warning: could not log to MinIO — {exc}. Start MinIO port-forward if needed.)_"
         return reply
     else:
@@ -207,7 +209,7 @@ def _handle_student(message: str):
                 mlflow.log_param("question", message[:500])
                 mlflow.log_param("teacher_reason", reason)
         except Exception:
-            traceback.print_exc()
+            logger.exception("Failed to log MLflow metrics")
     suffix = ""
     if score is not None:
         suffix = f"\n\n**Grade: {score}/10**"
@@ -267,10 +269,10 @@ with gr.Blocks(title="Distillation Flywheel") as demo:
             chat_history.append({"role": "user", "content": message})
             chat_history.append({"role": "assistant", "content": reply})
         except Exception as exc:
-            traceback.print_exc()
+            logger.exception("Chat request failed")
             chat_history.append({"role": "user", "content": message})
             chat_history.append(
-                {"role": "assistant", "content": f"ERROR (UI): {exc}\n\nSee terminal for full traceback."}
+                {"role": "assistant", "content": f"ERROR (UI): {exc}\n\nSee logs for full traceback."}
             )
         return "", chat_history
 
