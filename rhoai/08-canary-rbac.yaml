@@ -1,0 +1,43 @@
+# RBAC for canary-gateway pod:
+# - Read/write ConfigMap traffic-split
+# - Patch VirtualService code-review-gateway
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: canary-gateway-sa
+  namespace: sridharproject
+  labels:
+    app: canary-gateway
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: canary-gateway-role
+  namespace: sridharproject
+  labels:
+    app: canary-gateway
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["traffic-split"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["networking.istio.io"]
+    resources: ["virtualservices"]
+    resourceNames: ["code-review-gateway"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: canary-gateway-binding
+  namespace: sridharproject
+  labels:
+    app: canary-gateway
+subjects:
+  - kind: ServiceAccount
+    name: canary-gateway-sa
+    namespace: sridharproject
+roleRef:
+  kind: Role
+  name: canary-gateway-role
+  apiGroup: rbac.authorization.k8s.io

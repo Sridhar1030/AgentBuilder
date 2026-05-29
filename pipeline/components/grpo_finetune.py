@@ -1,9 +1,11 @@
 """
-KFP Component -- QLoRA SFT Fine-Tune via Kubeflow TrainJob (Trainer v2)
+KFP Component -- GRPO Fine-Tune via Kubeflow TrainJob (Trainer v2)
 
-Creates a trainer.kubeflow.org/v1alpha1 TrainJob that references the
-torch-distributed ClusterTrainingRuntime shipped with RHOAI.
-The runtime handles torchrun setup, MASTER_ADDR, NCCL, etc.
+Creates a trainer.kubeflow.org/v1alpha1 TrainJob for single-node multi-GPU GRPO
+training with verifiable reward functions (correctness, format, conciseness).
+
+If fewer than min_prompts training prompts exist, skips GRPO and passes
+through the DPO (or SFT) model path unchanged.
 """
 
 from kfp import dsl
@@ -11,23 +13,35 @@ from kfp import dsl
 
 @dsl.component(
     base_image="python:3.11-slim",
-    packages_to_install=["kubernetes==31.0.0", "boto3"],
+    packages_to_install=["kubernetes==31.0.0", "boto3", "requests"],
 )
-def finetune(
-    gold_data_path: str,
-    model_output_s3_path: str,
-    base_model_id: str,
+def grpo_finetune(
+    dpo_model_s3_path: str,
+    grpo_data_s3_path: str,
+    model_version: str,
     s3_endpoint: str,
     s3_access_key: str,
     s3_secret_key: str,
-    num_epochs: int = 3,
-    batch_size: int = 4,
-    learning_rate: float = 2e-4,
+    grpo_output_s3_path: str = "",
+    system_prompt: str = "",
+    test_questions_json: str = "",
+    num_epochs: int = 1,
+    batch_size: int = 1,
+    learning_rate: float = 5e-7,
     lora_r: int = 16,
     lora_alpha: int = 32,
+    num_generations: int = 4,
+    grpo_beta: float = 0.0,
+    temperature: float = 0.7,
+    max_completion_length: int = 512,
+    loss_type: str = "dapo",
+    min_prompts: int = 10,
+    weak_categories_json: str = "",
+    use_vllm: bool = False,
     run_label: str = "",
 ) -> str:
-    """Create a TrainJob for multi-GPU QLoRA SFT training."""
+    """Create a TrainJob for single-node multi-GPU GRPO training."""
+    import json
     import time
 
     import boto3
@@ -37,7 +51,22 @@ def finetune(
     TRAINJOB_VERSION = "v1alpha1"
     TRAINJOB_PLURAL = "trainjobs"
 
-    config.load_incluster_config()
+    print(f"--- GRPO FINE-TUNE STEP (TrainJob v2, single-node multi-GPU) ---")
+    print(f"  Base model:     {dpo_model_s3_path}")
+    print(f"  GRPO data:    {grpo_data_s3_path}")
+    print(f"  Version:      {model_version}")
+    print(f"  Epochs:       {num_epochs}")
+    print(f"  Generations:  {num_generations}")
+    print(f"  LR:           {learning_rate}")
+    print(f"  Beta:         {grpo_beta}")
+    print(f"  Temperature:  {temperature}")
+    print(f"  Loss type:    {loss_type}")
+    print(f"  Min prompts:  {min_prompts}")
+    print(f"  Use vLLM:     {use_vllm}")
+    print(f"  Run label:    {run_label or '(not set)'}")
+    print("=" * 60)
+
+    model_output_s3_path = grpo_output_s3_path if grpo_output_s3_path else dpo_model_s3_path
 
     s3 = boto3.client(
         "s3",
@@ -45,15 +74,95 @@ def finetune(
         aws_access_key_id=s3_access_key,
         aws_secret_access_key=s3_secret_key,
     )
+
+    def _load_s3_json(s3_path: str) -> dict:
+        parts = s3_path.replace("s3://", "").split("/", 1)
+        obj = s3.get_object(Bucket=parts[0], Key=parts[1])
+        return json.loads(obj["Body"].read().decode())
+
+    def _build_grpo_records() -> list[dict]:
+        records = []
+        seen = set()
+
+        try:
+            bank = _load_s3_json(grpo_data_s3_path)
+            questions = bank.get("all_questions", [])
+            if not questions and "topics" in bank:
+                for topic_qs in bank["topics"].values():
+                    questions.extend(topic_qs)
+            for q in questions:
+                if isinstance(q, dict):
+                    text = q.get("question", q.get("prompt", ""))
+                    bug = q.get("has_bug", True)
+                    issues = q.get("expected_issues", [])
+                    cat = q.get("category", "diff_bank")
+                else:
+                    text = str(q)
+                    bug = True
+                    issues = []
+                    cat = "diff_bank"
+                key = text.strip()[:200]
+                if not text or key in seen:
+                    continue
+                seen.add(key)
+                records.append({
+                    "prompt": text,
+                    "has_bug": bug,
+                    "expected_issues": issues,
+                    "category": cat,
+                })
+        except Exception as e:
+            print(f"  Warning: could not load diff-bank from {grpo_data_s3_path}: {e}")
+
+        if test_questions_json:
+            try:
+                test_cases = json.loads(test_questions_json)
+                for entry in test_cases:
+                    q = entry.get("question", "")
+                    key = q.strip()[:200]
+                    if not q or key in seen:
+                        continue
+                    seen.add(key)
+                    records.append({
+                        "prompt": q,
+                        "has_bug": entry.get("has_bug", True),
+                        "expected_issues": entry.get("expected_issues", []),
+                        "category": entry.get("category", "eval"),
+                    })
+            except Exception as e:
+                print(f"  Warning: could not parse test_questions_json: {e}")
+
+        return records
+
+    records = _build_grpo_records()
+    num_prompts = len(records)
+    print(f"[{time.strftime('%H:%M:%S')}] GRPO dataset has {num_prompts} prompts (min required: {min_prompts})")
+
+    if num_prompts < min_prompts:
+        print(
+            f"[{time.strftime('%H:%M:%S')}] SKIPPING GRPO: only {num_prompts} prompts "
+            f"(< {min_prompts}). Returning DPO model."
+        )
+        return dpo_model_s3_path
+
+    # Upload merged GRPO JSONL for the training job
+    grpo_jsonl_key = f"grpo/train-{model_version}-{int(time.time())}.jsonl"
+    grpo_jsonl_path = grpo_data_s3_path.replace("s3://", "").split("/", 1)
+    grpo_bucket = grpo_jsonl_path[0]
+    body = "\n".join(json.dumps(r) for r in records)
+    s3.put_object(Bucket=grpo_bucket, Key=grpo_jsonl_key, Body=body.encode())
+    grpo_dataset_s3 = f"s3://{grpo_bucket}/{grpo_jsonl_key}"
+    print(f"[{time.strftime('%H:%M:%S')}] Uploaded GRPO dataset to {grpo_dataset_s3}")
+
+    config.load_incluster_config()
     apps_api = client.AppsV1Api()
     custom_api = client.CustomObjectsApi()
     core_api = client.CoreV1Api()
 
     namespace = "sridharproject"
-    job_name = f"finetune-{int(time.time())}"
+    job_name = f"grpo-{int(time.time())}"
     image = "image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.3.6"
 
-    # --- GPU evacuation and restore helpers ---
     isvc_deployment = "code-review-llm-predictor"
 
     def _scale_down_kserve():
@@ -76,7 +185,11 @@ def finetune(
             print(f"[{time.strftime('%H:%M:%S')}] KServe scale-down skipped: {e}")
 
     def _restore_kserve():
-        """Scale KServe back up and wait until the pod is Ready."""
+        import requests
+
+        predictor_url = (
+            f"http://code-review-llm-predictor.{namespace}.svc.cluster.local:8080"
+        )
         try:
             dep = apps_api.read_namespaced_deployment(isvc_deployment, namespace)
             if (dep.spec.replicas or 0) < 1:
@@ -86,25 +199,33 @@ def finetune(
                 )
             for attempt in range(60):
                 time.sleep(10)
+                try:
+                    resp = requests.get(f"{predictor_url}/v1/models", timeout=15)
+                    if resp.ok:
+                        print(
+                            f"[{time.strftime('%H:%M:%S')}] {isvc_deployment} HTTP ready "
+                            f"(waited {(attempt + 1) * 10}s)"
+                        )
+                        return
+                except requests.RequestException:
+                    pass
                 pods = core_api.list_namespaced_pod(
                     namespace, label_selector=f"app=isvc.{isvc_deployment}",
                 )
-                for pod in pods.items:
-                    if all(
-                        cs.ready
-                        for cs in (pod.status.container_statuses or [])
-                    ):
-                        print(f"[{time.strftime('%H:%M:%S')}] {isvc_deployment} is Ready (waited {(attempt+1)*10}s)")
-                        return
                 if attempt % 6 == 5:
-                    print(f"[{time.strftime('%H:%M:%S')}] Still waiting for {isvc_deployment} to be Ready... ({(attempt+1)*10}s)")
-            print(f"[{time.strftime('%H:%M:%S')}] WARNING: {isvc_deployment} not Ready after 600s, proceeding anyway")
+                    print(
+                        f"[{time.strftime('%H:%M:%S')}] Still waiting for {isvc_deployment} "
+                        f"HTTP... ({(attempt + 1) * 10}s, pods={len(pods.items)})"
+                    )
+            raise RuntimeError(
+                f"{isvc_deployment} not HTTP-ready at {predictor_url} after 600s"
+            )
         except Exception as e:
             print(f"[{time.strftime('%H:%M:%S')}] KServe restore failed: {e}")
+            raise
 
     _scale_down_kserve()
 
-    # --- Discover GPU topology from the cluster ---
     available_gpu_nodes = 0
     gpus_per_node_list = []
     blocked_taints = {"node.kubernetes.io/unreachable", "node.kubernetes.io/not-ready"}
@@ -136,50 +257,40 @@ def finetune(
                 gpu_used = gpu_used_per_node.get(node.metadata.name, 0)
                 gpu_free = gpu_cap - gpu_used
                 print(f"[{time.strftime('%H:%M:%S')}]   Node {node.metadata.name}: {gpu_cap} total, {gpu_used} used, {gpu_free} free")
-                if gpu_free >= 4:
+                if gpu_free >= 1:
                     available_gpu_nodes += 1
                     gpus_per_node_list.append(gpu_free)
                 else:
-                    print(f"[{time.strftime('%H:%M:%S')}]   -> Skipping (need 4 free GPUs, only {gpu_free})")
+                    print(f"[{time.strftime('%H:%M:%S')}]   -> Skipping (0 free GPUs)")
     except Exception as e:
         print(f"[{time.strftime('%H:%M:%S')}] Could not query nodes ({e}), falling back to 1 node x 4 GPUs")
-        available_gpu_nodes = 2
-        gpus_per_node_list = [4, 4]
+        available_gpu_nodes = 1
+        gpus_per_node_list = [4]
 
     num_gpus_per_node = min(gpus_per_node_list) if gpus_per_node_list else 4
-
-    safe_gpu_nodes = max(1, available_gpu_nodes - 1)
-    print(f"[{time.strftime('%H:%M:%S')}] Reserving 1 node buffer -> {safe_gpu_nodes} schedulable nodes")
-
+    safe_gpu_nodes = 1
     total_gpus = safe_gpu_nodes * num_gpus_per_node
-    print(f"[{time.strftime('%H:%M:%S')}] GPU topology: {safe_gpu_nodes} usable nodes x {num_gpus_per_node} GPUs/node = {total_gpus} total")
-
-    print(f"--- SFT FINE-TUNE STEP (TrainJob v2, multi-node multi-GPU) ---")
-    print(f"  Job name:     {job_name}")
-    print(f"  Image:        {image}")
-    print(f"  Nodes:        {safe_gpu_nodes}")
-    print(f"  GPUs/node:    {num_gpus_per_node}")
-    print(f"  Total GPUs:   {total_gpus}")
-    print(f"  Base model:   {base_model_id}")
-    print(f"  Gold data:    {gold_data_path}")
-    print(f"  Output:       {model_output_s3_path}")
-    print(f"  Epochs:       {num_epochs}")
-    print(f"  Batch size:   {batch_size}")
-    print(f"  LR:           {learning_rate}")
-    print(f"  LoRA r/alpha: {lora_r}/{lora_alpha}")
-    print(f"  Run label:    {run_label or '(not set)'}")
-    print(f"  Runtime:      torch-distributed (Trainer v2)")
-    print("=" * 60)
+    print(f"[{time.strftime('%H:%M:%S')}] GRPO topology: {safe_gpu_nodes} node x {num_gpus_per_node} GPUs = {total_gpus} total (single-node, QLoRA)")
 
     env_list = [
-        {"name": "GOLD_DATA_PATH", "value": gold_data_path},
+        {"name": "TRAINING_MODE", "value": "grpo"},
+        {"name": "PYTORCH_CUDA_ALLOC_CONF", "value": "expandable_segments:True"},
+        {"name": "GRPO_DATA_PATH", "value": grpo_dataset_s3},
+        {"name": "BASE_MODEL_ID", "value": dpo_model_s3_path},
         {"name": "MODEL_OUTPUT_S3_PATH", "value": model_output_s3_path},
-        {"name": "BASE_MODEL_ID", "value": base_model_id},
         {"name": "NUM_EPOCHS", "value": str(num_epochs)},
         {"name": "BATCH_SIZE", "value": str(batch_size)},
         {"name": "LEARNING_RATE", "value": str(learning_rate)},
         {"name": "LORA_R", "value": str(lora_r)},
         {"name": "LORA_ALPHA", "value": str(lora_alpha)},
+        {"name": "NUM_GENERATIONS", "value": str(num_generations)},
+        {"name": "GRPO_BETA", "value": str(grpo_beta)},
+        {"name": "MAX_COMPLETION_LENGTH", "value": str(max_completion_length)},
+        {"name": "GRPO_LOSS_TYPE", "value": loss_type},
+        {"name": "GRPO_TEMPERATURE", "value": str(temperature)},
+        {"name": "GRPO_SYSTEM_PROMPT", "value": system_prompt},
+        {"name": "GRPO_WEAK_CATEGORIES", "value": weak_categories_json},
+        {"name": "USE_VLLM", "value": "1" if use_vllm else "0"},
         {"name": "S3_ENDPOINT", "value": s3_endpoint},
         {"name": "S3_ACCESS_KEY", "value": s3_access_key},
         {"name": "S3_SECRET_KEY", "value": s3_secret_key},
@@ -234,8 +345,8 @@ def finetune(
     timeout = 36000
     elapsed = 0
 
-    print(f"[{time.strftime('%H:%M:%S')}] Submitted TrainJob {job_name} ({safe_gpu_nodes} nodes x {num_gpus_per_node} GPUs = {total_gpus} total)")
-    print(f"[{time.strftime('%H:%M:%S')}] Timeout set to {timeout}s ({timeout/3600:.1f}h)")
+    print(f"[{time.strftime('%H:%M:%S')}] Submitted GRPO TrainJob {job_name}")
+    print(f"[{time.strftime('%H:%M:%S')}] Output will go to: {model_output_s3_path}")
 
     def _model_s3_timestamp():
         try:
@@ -256,7 +367,6 @@ def finetune(
             return True
         return ts > model_ts_before
 
-    result = None
     try:
         job_failed = False
         fail_msg = ""
@@ -266,22 +376,16 @@ def finetune(
             elapsed += poll_interval
 
             if _model_is_new():
-                hrs, rem = divmod(elapsed, 3600)
-                mins = rem // 60
-                status = "Failed" if job_failed else "Running/Succeeded"
-                print(f"[{time.strftime('%H:%M:%S')}] SFT model updated in S3 (job status={status}, elapsed={hrs}h{mins}m). Success.")
                 try:
                     custom_api.delete_namespaced_custom_object(
                         group=TRAINJOB_GROUP, version=TRAINJOB_VERSION,
                         namespace=namespace, plural=TRAINJOB_PLURAL, name=job_name,
                     )
-                except Exception as cleanup_err:
-                    print(f"[{time.strftime('%H:%M:%S')}] TrainJob cleanup skipped: {cleanup_err}")
-                result = model_output_s3_path
-                return result
+                except Exception:
+                    pass
+                return model_output_s3_path
 
             if job_failed:
-                print(f"[{time.strftime('%H:%M:%S')}] Waiting for model upload... (elapsed={elapsed}s)")
                 continue
 
             try:
@@ -290,46 +394,27 @@ def finetune(
                     namespace=namespace, plural=TRAINJOB_PLURAL, name=job_name,
                 )
             except Exception as e:
-                print(f"[{time.strftime('%H:%M:%S')}] Could not fetch job status ({e}), will retry...")
+                print(f"[{time.strftime('%H:%M:%S')}] Could not fetch job status ({e})")
                 continue
 
             conditions = job.get("status", {}).get("conditions", [])
             for c in conditions:
                 ctype = c.get("type")
                 if ctype == "Complete" and c.get("status") == "True":
-                    hrs, rem = divmod(elapsed, 3600)
-                    mins = rem // 60
-                    print(f"[{time.strftime('%H:%M:%S')}] TrainJob {job_name} completed ({hrs}h{mins}m)")
-                    result = model_output_s3_path
-                    return result
+                    return model_output_s3_path
                 if ctype == "Failed" and c.get("status") == "True":
                     job_failed = True
                     fail_msg = c.get("message", "unknown error")
-                    print(f"[{time.strftime('%H:%M:%S')}] SFT job {job_name} status=Failed. Continuing to poll S3 for model upload...")
+                    print(f"[{time.strftime('%H:%M:%S')}] GRPO job failed, polling S3...")
                     break
 
-            if not job_failed:
-                hrs, rem = divmod(elapsed, 3600)
-                mins = rem // 60
-                print(f"[{time.strftime('%H:%M:%S')}] TrainJob {job_name} running (elapsed={hrs}h{mins}m)")
+            hrs, rem = divmod(elapsed, 3600)
+            mins = rem // 60
+            print(f"[{time.strftime('%H:%M:%S')}] GRPO TrainJob running (elapsed={hrs}h{mins}m)")
 
         if job_failed:
-            try:
-                pods = core_api.list_namespaced_pod(
-                    namespace=namespace,
-                    label_selector=f"batch.kubernetes.io/job-name={job_name}-node-0",
-                )
-                if pods.items:
-                    pod_name = pods.items[0].metadata.name
-                    logs = core_api.read_namespaced_pod_log(
-                        name=pod_name, namespace=namespace, tail_lines=100,
-                    )
-                    fail_msg = f"{fail_msg}\n\n--- Pod {pod_name} logs ---\n{logs}"
-            except Exception as e:
-                fail_msg = f"{fail_msg} (could not fetch pod logs: {e})"
-            raise RuntimeError(f"TrainJob {job_name} failed and model never appeared in S3: {fail_msg}")
-
-        raise TimeoutError(f"TrainJob {job_name} did not complete within {timeout}s")
+            raise RuntimeError(f"GRPO TrainJob {job_name} failed: {fail_msg}")
+        raise TimeoutError(f"GRPO TrainJob {job_name} did not complete within {timeout}s")
     finally:
-        print(f"[{time.strftime('%H:%M:%S')}] SFT step done. Restoring KServe student model...")
+        print(f"[{time.strftime('%H:%M:%S')}] GRPO step done. Restoring KServe...")
         _restore_kserve()

@@ -67,16 +67,50 @@ domain:
   # You can also point to a JSON file: test_questions_file: "domain/test_questions.json"
   test_questions_file: "pipeline/domain/test_questions.json"
 
+  # Agent-eval-harness configuration for structured judge evaluation.
+  # See eval/eval.yaml for judge definitions, thresholds, and dataset schema.
+  eval_yaml: "eval/eval.yaml"
+  eval_cases_dir: "eval/dataset/cases"
+
 # -- TRAINING CONFIG ----------------------------------------------------------
 # Hyperparameters. Sensible defaults provided -- tune as needed.
 training:
   sft_epochs: 3
-  dpo_epochs: 1
-  dpo_beta: 0.3
-  min_dpo_pairs: 3
-  max_supplement_questions: 5
-  static_bank_sample_size: 300
-  sft_mix_ratio: 0.15
+  dpo_epochs: 2
+  dpo_beta: 0.1
+  min_dpo_pairs: 10
+  max_supplement_questions: 15
+  static_bank_sample_size: 50
+  sft_mix_ratio: 0.20
+
+# -- GRPO CONFIG --------------------------------------------------------------
+# Third training stage after DPO: online RL with verifiable reward functions.
+grpo:
+  num_generations: 2
+  learning_rate: 5.0e-7
+  num_epochs: 2
+  beta: 0.0
+  temperature: 0.7
+  min_prompts: 10
+  max_completion_length: 256
+  loss_type: grpo
+  reward_weights: [3.0, 0.8, 0.3]
+  diff_bank_path: "s3://mlflow-artifacts/synthetic/code-review/diff-bank.json"
+  use_vllm: false
+
+# -- CANARY CONFIG ------------------------------------------------------------
+# Progressive traffic splitting between Teacher and Student.
+# The canary gateway routes requests, adds model attribution, and syncs
+# weights to an Istio VirtualService for production-level routing.
+canary:
+  enabled: true
+  gateway_url: "http://canary-gateway.{{namespace}}.svc.cluster.local:8090"
+  virtualservice_name: "code-review-gateway"
+  teacher_service: "http://ollama.{{namespace}}.svc.cluster.local:11434"
+  student_service: "http://code-review-llm-predictor.{{namespace}}.svc.cluster.local:80"
+  shift_increment: 10
+  initial_teacher_weight: 90
+  initial_student_weight: 10
 
 # -- IMAGES -------------------------------------------------------------------
 # Container images. /distill.prerequisites builds these in-cluster.

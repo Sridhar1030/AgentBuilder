@@ -83,6 +83,20 @@ venv311/
 mlflow.db
 taskDone.txtextension/
 
-# —— Docs & images ————————————————————————————————————————————————
+# —— Desloppify (local state, not committed) ——————————————————————
+.desloppify/
+
+# —— Docs, plans & knowledge bases ————————————————————————————————
 docs/
 images/
+.cursor/plans/
+
+# —— Compiled pipeline YAMLs (regenerate from .py) ————————————————
+pipeline/*.yaml
+unified_pipeline.yaml
+code_review_pipeline.yaml
+AgentBuilderPipeline_Final.yaml
+
+# —— Generated eval artifacts (regenerate with generate_cases.py) —
+eval/dataset/
+eval/prompts/

@@ -14,6 +14,8 @@ VersionOutputs = NamedTuple(
         ("version", str),
         ("gold_data_path", str),
         ("model_output_path", str),
+        ("dpo_model_output_path", str),
+        ("grpo_model_output_path", str),
         ("prev_model_path", str),
     ],
 )
@@ -32,7 +34,17 @@ def resolve_version(
     gold_bucket: str,
     hf_base_model_id: str = "Qwen/Qwen2.5-Coder-1.5B-Instruct",
     explicit_version: str = "",
-) -> NamedTuple("VersionOutputs", [("version", str), ("gold_data_path", str), ("model_output_path", str), ("prev_model_path", str)]):
+) -> NamedTuple(
+    "VersionOutputs",
+    [
+        ("version", str),
+        ("gold_data_path", str),
+        ("model_output_path", str),
+        ("dpo_model_output_path", str),
+        ("grpo_model_output_path", str),
+        ("prev_model_path", str),
+    ],
+):
     """Find the latest student-1b-vN/ in MinIO and return vN+1 with paths."""
     import re
     from collections import namedtuple
@@ -77,19 +89,67 @@ def resolve_version(
 
     if version_numbers:
         prev_version = max(version_numbers)
-        prev_model_path = f"s3://{model_bucket}/{model_prefix}v{prev_version}/"
-        print(f"Previous model: {prev_model_path} (iterative SFT will start from here)")
+        sft_path = f"s3://{model_bucket}/{model_prefix}v{prev_version}/"
+        dpo_path = f"s3://{model_bucket}/{model_prefix}v{prev_version}-dpo/"
+        grpo_path = f"s3://{model_bucket}/{model_prefix}v{prev_version}-grpo/"
+
+        def _has_gate_marker(key):
+            try:
+                s3.head_object(Bucket=model_bucket, Key=key)
+                return True
+            except Exception as e:
+                err_code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
+                if err_code not in ("404", "NoSuchKey") and not isinstance(e, s3.exceptions.NoSuchKey):
+                    print(f"  WARNING: S3 error checking {key}: {e}")
+                return False
+
+        grpo_marker = f"{model_prefix}v{prev_version}-grpo/.gate-passed"
+        dpo_marker = f"{model_prefix}v{prev_version}-dpo/.gate-passed"
+
+        prev_model_path = sft_path
+        chosen_reason = "SFT checkpoint (fallback)"
+
+        if _has_gate_marker(grpo_marker):
+            prev_model_path = grpo_path
+            chosen_reason = "GRPO model (gate passed -- best from previous cycle)"
+            print(f"  Found .gate-passed at {grpo_marker}")
+        elif _has_gate_marker(dpo_marker):
+            prev_model_path = dpo_path
+            chosen_reason = "DPO model (gate passed)"
+            print(f"  Found .gate-passed at {dpo_marker}")
+        else:
+            print(f"  No .gate-passed marker at {grpo_marker}")
+            print(f"  No .gate-passed marker at {dpo_marker}")
+
+        print(f"Previous model: {prev_model_path} ({chosen_reason})")
     else:
         prev_model_path = hf_base_model_id
         print(f"No previous model found -- SFT will start from HuggingFace base: {hf_base_model_id}")
 
     gold_data_path = f"s3://{gold_bucket}/gold/train-{version}.jsonl"
     model_output_path = f"s3://{model_bucket}/{model_prefix}{version}/"
+    dpo_model_output_path = f"s3://{model_bucket}/{model_prefix}{version}-dpo/"
+    grpo_model_output_path = f"s3://{model_bucket}/{model_prefix}{version}-grpo/"
 
     print(f"Version: {version}")
     print(f"Gold data path: {gold_data_path}")
-    print(f"Model output path: {model_output_path}")
+    print(f"Model output path (SFT): {model_output_path}")
+    print(f"Model output path (DPO): {dpo_model_output_path}")
+    print(f"Model output path (GRPO): {grpo_model_output_path}")
     print(f"Prev model path: {prev_model_path or '(none)'}")
 
-    Outputs = namedtuple("VersionOutputs", ["version", "gold_data_path", "model_output_path", "prev_model_path"])
-    return Outputs(version=version, gold_data_path=gold_data_path, model_output_path=model_output_path, prev_model_path=prev_model_path)
+    Outputs = namedtuple(
+        "VersionOutputs",
+        [
+            "version", "gold_data_path", "model_output_path",
+            "dpo_model_output_path", "grpo_model_output_path", "prev_model_path",
+        ],
+    )
+    return Outputs(
+        version=version,
+        gold_data_path=gold_data_path,
+        model_output_path=model_output_path,
+        dpo_model_output_path=dpo_model_output_path,
+        grpo_model_output_path=grpo_model_output_path,
+        prev_model_path=prev_model_path,
+    )

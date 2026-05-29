@@ -24,7 +24,6 @@ import argparse
 import json
 import os
 import re
-import sys
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path

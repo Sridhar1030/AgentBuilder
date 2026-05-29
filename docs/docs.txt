@@ -40,7 +40,8 @@ Self-hosted Teacher: Replaced the external Groq API with an on-cluster Ollama in
 Domain-specific Student: Switched to Qwen2.5-Coder 1.5B Instruct as the Student base model, chosen for its strong code understanding at a size that fits on a single T4 GPU (16GB VRAM).
 Iterative fine-tuning: Each pipeline run starts SFT from the previous run's checkpoint (not from the base model). The Student accumulates knowledge across runs — v1 → v2 → v3 → v4 etc.
 DPO (Direct Preference Optimization): Added a second training phase after SFT. The Teacher and Student both answer the same prompts, a grading function scores both, and when the Teacher's answer is meaningfully better, a preference pair is created (Teacher = chosen, Student = rejected). The Student is then trained with DPO to prefer the Teacher's style of answering. DPO teaches judgment, not just format.
-Multi-GPU distributed training: SFT and DPO now run as PyTorchJobs across multiple nodes using torchrun and DDP. The pipeline dynamically discovers available GPU nodes at runtime, checks for free GPU capacity, and scales the training job accordingly — no hardcoded node counts.
+GRPO (Group Relative Policy Optimization): Added a third training phase after DPO. Instead of offline preference pairs, GRPO generates multiple completions per prompt and scores them with verifiable reward functions (correctness, format, conciseness) derived from the eval judges. Curriculum training upweights weak categories identified by eval-analyze. This directly optimizes the metrics the model is evaluated on.
+Multi-GPU distributed training: SFT, DPO, and GRPO now run as TrainJobs (Kubeflow Trainer v2) across multiple nodes using torchrun and DDP. The pipeline dynamically discovers available GPU nodes at runtime, checks for free GPU capacity, and scales the training job accordingly — no hardcoded node counts.
 
 The Pipeline (9 Steps)
 The full pipeline runs as a single automated Kubeflow Pipeline on OpenShift AI:
@@ -52,9 +53,10 @@ The full pipeline runs as a single automated Kubeflow Pipeline on OpenShift AI:
 4a. Collect Human Feedback — Reads any pending human feedback DPO pairs from MinIO (submitted by developers via the IDE extension) and moves consumed pairs to a "used" prefix so they are never processed twice.
 4b. Extract Preferences — The deployed SFT Student and the Teacher both answer prompts from a question bank. A grading function scores both responses. When the Teacher scores meaningfully higher, a preference pair (chosen/rejected) is created for DPO training.
 4c. Merge Preferences — Combines the automated preference pairs (from 4b) with the human feedback pairs (from 4a) into a single dataset.
-5. DPO Fine-Tune — Refines the SFT model using the merged preference data. Runs as a multi-GPU PyTorchJob, same as SFT.
-6. Deploy Final Model — Deploys the DPO-refined model via KServe, replacing the temporary SFT deployment.
-7. Evaluate — The Teacher grades the final model on a fixed test set. Scores are logged to MLflow for comparison across runs.
+5. DPO Fine-Tune — Refines the SFT model using the merged preference data. Runs as a multi-GPU TrainJob, same as SFT.
+5b. GRPO Fine-Tune — Online RL with verifiable rewards (correctness, format, conciseness) on diff-bank + test questions. Starts from the DPO checkpoint; skipped if too few prompts.
+6. Deploy Final Model — Deploys the GRPO-refined model via KServe (or DPO/SFT if GRPO skipped), replacing the temporary SFT deployment.
+7. Evaluate — Structured judges grade the final model on a fixed test set. Scores are logged to MLflow for comparison across runs.
 
 Human Feedback Loop
 The pipeline doesn't just learn from automated Teacher-Student comparisons. Developers can directly influence the next training run through a feedback loop built into the IDE:
@@ -113,8 +115,10 @@ SFT + QLoRA
 Supervised Fine-Tuning with quantized LoRA for memory-efficient training
 DPO (Direct Preference Optimization)
 Alignment training using preference pairs (chosen vs rejected responses)
-PyTorchJob + torchrun
-Distributed multi-GPU training across nodes via Kubeflow Training Operator
+GRPO (Group Relative Policy Optimization)
+Online RL with verifiable rewards -- correctness, format, conciseness -- from eval judges
+Kubeflow Trainer v2 (TrainJob) + torchrun
+Distributed multi-GPU training across nodes via Kubeflow Trainer
 Kubeflow Trainer
 Manages GPU training jobs on-cluster
 Custom Kubernetes Operator
@@ -194,7 +198,6 @@ Each cycle, the Student closes the gap with the Teacher, delivering better answe
 Remaining Challenges / Problems
 Training data diversity — The gold dataset is currently static (~8,300 samples). As the Student improves, it saturates on repeated data. Expanding the dataset with more diverse examples and real-world samples is needed to continue improving.
 Evaluation depth — The Teacher-as-Judge approach gives a single 1-10 score. More rigorous evaluation (factual accuracy, hallucination detection, domain-specific benchmarks) would provide stronger confidence in model quality.
-No automated quality gate — The pipeline deploys every fine-tuned model regardless of evaluation scores. A quality threshold should block deployment if the new model scores worse than the previous version.
-Canary deployment and rollback — Today the pipeline does a full model swap. A safer approach would split traffic (e.g. 80/20 old/new), compare performance, and only roll forward when the new model proves better.
+Canary deployment and rollback — KServe canary rollouts are not officially supported on RHOAI yet (confirmed by Red Hat model serving team). Currently using a custom FastAPI gateway for traffic splitting. Will revisit when KServe canary lands in RHOAI.
 Cost tracking — There is no visibility into the cost per training cycle (GPU hours, API calls, storage). Adding cost metrics would help determine when the distillation ROI plateaus.
 Feedback volume — The human feedback loop is functional but requires a meaningful volume of thumbs-down signals to measurably shift DPO training. In a small team, this accumulates slowly.

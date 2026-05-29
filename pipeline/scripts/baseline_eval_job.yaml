@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: baseline-eval
+  name: baseline-eval-ab
   namespace: sridharproject
 spec:
   backoffLimit: 0
@@ -14,7 +14,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: eval
-          image: quay.io/rh-ee-srpillai/distillation-trainer:v1.1.4
+          image: image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.3.6
           command: ["python", "/opt/scripts/baseline_eval.py"]
           env:
             - name: AWS_ACCESS_KEY_ID
@@ -23,6 +23,12 @@ spec:
               value: "minioadmin123"
             - name: HF_HOME
               value: "/tmp/hf_cache"
+            - name: MLFLOW_EXPERIMENT
+              value: "AgentBuilder-Final"
+            - name: TEST_QUESTIONS_FILE
+              value: "/opt/config/test_questions.json"
+            - name: EVAL_YAML_PATH
+              value: "/opt/config/eval.yaml"
           resources:
             requests:
               cpu: "2"
@@ -36,7 +42,15 @@ spec:
             - name: script
               mountPath: /opt/scripts/baseline_eval.py
               subPath: baseline_eval.py
+            - name: config
+              mountPath: /opt/config
       volumes:
         - name: script
           configMap:
-            name: baseline-eval-script
+            name: baseline-eval-config
+            items:
+              - key: baseline_eval.py
+                path: baseline_eval.py
+        - name: config
+          configMap:
+            name: baseline-eval-config

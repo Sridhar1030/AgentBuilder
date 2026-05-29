@@ -19,7 +19,6 @@ import os
 import sys
 import time
 import uuid
-import concurrent.futures
 
 import boto3
 import requests

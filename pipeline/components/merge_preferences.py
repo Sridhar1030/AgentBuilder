@@ -130,12 +130,14 @@ def merge_preferences(
             else:
                 sampled_sft = sft_records
 
+            # Avoid LGTM / "no issues" rejects — those are valid on clean diffs and
+            # teach the model to reject correct minimal reviews on buggy code.
             generic_rejects = [
-                "The code looks fine to me.",
-                "No issues found.",
-                "LGTM.",
-                "This change is acceptable.",
-                "I don't see any problems with this code.",
+                "This code could use some improvements but overall it looks okay.",
+                "Consider reviewing this more carefully before merging.",
+                "There might be some style issues here worth thinking about.",
+                "I'm not sure about this change; please double-check the logic.",
+                "This diff is hard to follow — maybe refactor for clarity.",
             ]
 
             for text in sampled_sft:
