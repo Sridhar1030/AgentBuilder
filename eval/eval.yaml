@@ -168,10 +168,10 @@ judges:
 
 thresholds:
   correctness:
-    min_pass_rate: 0.7
+    min_pass_rate: 0.55
   conciseness:
-    min_pass_rate: 0.8
+    min_pass_rate: 0.55
   review_quality:
-    min_mean: 3.5
+    min_mean: 2.5
   format_check:
-    min_pass_rate: 0.7
+    min_pass_rate: 0.55

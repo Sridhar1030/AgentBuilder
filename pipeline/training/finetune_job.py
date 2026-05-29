@@ -20,6 +20,8 @@ Environment Variables:
     S3_ENDPOINT             MinIO / S3 endpoint URL
     S3_ACCESS_KEY           S3 access key
     S3_SECRET_KEY           S3 secret key
+    RUN_LABEL               Pipeline run label (e.g. AB_1); used for MLflow run name
+    MLFLOW_RUN_NAME         Optional override for MLflow run name
 """
 
 import json
@@ -164,6 +166,17 @@ def merge_and_save(model, base_model_id: str, output_dir: str):
 # SFT Training
 # =========================================================================
 
+def training_run_name(stage: str, fallback: str) -> str:
+    """Build MLflow run name as {RUN_LABEL}-{stage}-train, with fallbacks."""
+    explicit = os.environ.get("MLFLOW_RUN_NAME", "").strip()
+    if explicit:
+        return explicit
+    run_label = os.environ.get("RUN_LABEL", "").strip()
+    if run_label:
+        return f"{run_label}-{stage}-train"
+    return fallback
+
+
 def setup_mlflow(mode: str):
     """Configure MLflow tracking if the URI is available."""
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "")
@@ -171,7 +184,7 @@ def setup_mlflow(mode: str):
         tracking_uri = "http://mlflow.sridharproject.svc.cluster.local:5000"
     s3_endpoint = os.environ.get("S3_ENDPOINT", "http://minio.sridharproject.svc.cluster.local:9000")
     mlflow.set_tracking_uri(tracking_uri)
-    experiment_name = "CodeReview-Training"
+    experiment_name = os.environ.get("MLFLOW_EXPERIMENT", "AgentBuilder-Final")
     mlflow.set_experiment(experiment_name)
     os.environ["MLFLOW_TRACKING_URI"] = tracking_uri
     os.environ["MLFLOW_S3_ENDPOINT_URL"] = s3_endpoint
@@ -247,7 +260,9 @@ def run_sft(s3):
         gradient_checkpointing_kwargs={"use_reentrant": False},
         ddp_find_unused_parameters=False,
         report_to=["mlflow"],
-        run_name=f"sft-{local_model_id.split('/')[-1]}-{num_epochs}ep",
+        run_name=training_run_name(
+            "sft", f"sft-{local_model_id.split('/')[-1]}-{num_epochs}ep"
+        ),
     )
 
     trainer = SFTTrainer(
@@ -280,11 +295,11 @@ def run_sft(s3):
 # DPO Training
 # =========================================================================
 
-def _format_pref_records(records: list[dict]) -> list[dict]:
+def _format_pref_records(records: list[dict], system_prompt: str = "") -> list[dict]:
     """Convert plain-text preference pairs to chat format for DPOTrainer.
 
     DPOTrainer in trl >= 0.12 expects chosen/rejected as lists of message dicts,
-    not raw strings.
+    not raw strings. Prompt must match inference (system + user), same as GRPO.
     """
     formatted = []
     for r in records:
@@ -293,8 +308,15 @@ def _format_pref_records(records: list[dict]) -> list[dict]:
         rejected = r.get("rejected", "")
         if not (prompt and chosen and rejected):
             continue
+        if system_prompt:
+            user_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+        else:
+            user_messages = [{"role": "user", "content": prompt}]
         formatted.append({
-            "prompt": [{"role": "user", "content": prompt}],
+            "prompt": user_messages,
             "chosen": [{"role": "assistant", "content": chosen}],
             "rejected": [{"role": "assistant", "content": rejected}],
         })
@@ -312,14 +334,15 @@ def run_dpo(s3):
     learning_rate = float(get_env("LEARNING_RATE", "5e-5"))
     lora_r = int(get_env("LORA_R", "16"))
     lora_alpha = int(get_env("LORA_ALPHA", "32"))
-    dpo_beta = float(get_env("DPO_BETA", "0.3"))
+    dpo_beta = float(get_env("DPO_BETA", "0.1"))
+    system_prompt = os.environ.get("DPO_SYSTEM_PROMPT", "")
 
     records = load_s3_jsonl(s3, pref_data_path)
     if not records:
         print("No preference data found -- skipping DPO")
         return
 
-    records = _format_pref_records(records)
+    records = _format_pref_records(records, system_prompt=system_prompt)
     dataset = Dataset.from_list(records)
     print(f"Loaded {len(dataset)} preference pairs from {pref_data_path}")
 
@@ -403,7 +426,7 @@ def run_dpo(s3):
         gradient_checkpointing_kwargs={"use_reentrant": False},
         ddp_find_unused_parameters=False,
         report_to=["mlflow"],
-        run_name=f"dpo-beta{dpo_beta}-{num_epochs}ep",
+        run_name=training_run_name("dpo", f"dpo-beta{dpo_beta}-{num_epochs}ep"),
     )
 
     # Let DPOTrainer handle PEFT via peft_config (don't apply get_peft_model manually).
@@ -735,7 +758,9 @@ def run_grpo(s3):
         ddp_find_unused_parameters=False,
         use_vllm=use_vllm,
         report_to=["mlflow"],
-        run_name=f"grpo-g{num_generations}-{num_epochs}ep",
+        run_name=training_run_name(
+            "grpo", f"grpo-g{num_generations}-{num_epochs}ep"
+        ),
     )
 
     trainer = GRPOTrainer(

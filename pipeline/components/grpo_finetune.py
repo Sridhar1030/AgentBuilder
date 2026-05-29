@@ -13,7 +13,7 @@ from kfp import dsl
 
 @dsl.component(
     base_image="python:3.11-slim",
-    packages_to_install=["kubernetes==31.0.0", "boto3"],
+    packages_to_install=["kubernetes==31.0.0", "boto3", "requests"],
 )
 def grpo_finetune(
     dpo_model_s3_path: str,
@@ -38,6 +38,7 @@ def grpo_finetune(
     min_prompts: int = 10,
     weak_categories_json: str = "",
     use_vllm: bool = False,
+    run_label: str = "",
 ) -> str:
     """Create a TrainJob for single-node multi-GPU GRPO training."""
     import json
@@ -62,6 +63,7 @@ def grpo_finetune(
     print(f"  Loss type:    {loss_type}")
     print(f"  Min prompts:  {min_prompts}")
     print(f"  Use vLLM:     {use_vllm}")
+    print(f"  Run label:    {run_label or '(not set)'}")
     print("=" * 60)
 
     model_output_s3_path = grpo_output_s3_path if grpo_output_s3_path else dpo_model_s3_path
@@ -159,7 +161,7 @@ def grpo_finetune(
 
     namespace = "sridharproject"
     job_name = f"grpo-{int(time.time())}"
-    image = "image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.3.5"
+    image = "image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.3.6"
 
     isvc_deployment = "code-review-llm-predictor"
 
@@ -183,6 +185,11 @@ def grpo_finetune(
             print(f"[{time.strftime('%H:%M:%S')}] KServe scale-down skipped: {e}")
 
     def _restore_kserve():
+        import requests
+
+        predictor_url = (
+            f"http://code-review-llm-predictor.{namespace}.svc.cluster.local:8080"
+        )
         try:
             dep = apps_api.read_namespaced_deployment(isvc_deployment, namespace)
             if (dep.spec.replicas or 0) < 1:
@@ -192,19 +199,30 @@ def grpo_finetune(
                 )
             for attempt in range(60):
                 time.sleep(10)
-                pods = core_api.list_namespaced_pod(
-                    namespace, label_selector=f"app=isvc.{isvc_deployment}",
-                )
-                for pod in pods.items:
-                    if all(cs.ready for cs in (pod.status.container_statuses or [])):
+                try:
+                    resp = requests.get(f"{predictor_url}/v1/models", timeout=15)
+                    if resp.ok:
                         print(
-                            f"[{time.strftime('%H:%M:%S')}] {isvc_deployment} is Ready "
+                            f"[{time.strftime('%H:%M:%S')}] {isvc_deployment} HTTP ready "
                             f"(waited {(attempt + 1) * 10}s)"
                         )
                         return
-            print(f"[{time.strftime('%H:%M:%S')}] WARNING: {isvc_deployment} not Ready after 600s")
+                except requests.RequestException:
+                    pass
+                pods = core_api.list_namespaced_pod(
+                    namespace, label_selector=f"app=isvc.{isvc_deployment}",
+                )
+                if attempt % 6 == 5:
+                    print(
+                        f"[{time.strftime('%H:%M:%S')}] Still waiting for {isvc_deployment} "
+                        f"HTTP... ({(attempt + 1) * 10}s, pods={len(pods.items)})"
+                    )
+            raise RuntimeError(
+                f"{isvc_deployment} not HTTP-ready at {predictor_url} after 600s"
+            )
         except Exception as e:
             print(f"[{time.strftime('%H:%M:%S')}] KServe restore failed: {e}")
+            raise
 
     _scale_down_kserve()
 
@@ -276,7 +294,10 @@ def grpo_finetune(
         {"name": "S3_ENDPOINT", "value": s3_endpoint},
         {"name": "S3_ACCESS_KEY", "value": s3_access_key},
         {"name": "S3_SECRET_KEY", "value": s3_secret_key},
+        {"name": "MLFLOW_EXPERIMENT", "value": "AgentBuilder-Final"},
     ]
+    if run_label:
+        env_list.append({"name": "RUN_LABEL", "value": run_label})
 
     trainjob = {
         "apiVersion": f"{TRAINJOB_GROUP}/{TRAINJOB_VERSION}",

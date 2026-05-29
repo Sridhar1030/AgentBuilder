@@ -2,10 +2,10 @@
 KFP Component -- Extract Preference Pairs for DPO
 
 Two data sources:
-  Source A: eval_results.json from the previous SFT run (MLflow artifact).
-            Entries where student_score < teacher_score become preference pairs.
-  Source B: Query the Kubeflow question bank against both Student and Teacher,
-            grade both, and produce preference pairs where teacher wins.
+  Source A: eval-sft eval_results.json (AgentBuilder-Final). For each case where
+            the harness correctness judge failed, teacher review = chosen,
+            student review = rejected.
+  Source B: Supplement from question bank where teacher beats student by score gap.
 
 Teacher API: any OpenAI-compatible /v1/chat/completions endpoint (Ollama, Groq, vLLM, etc.)
 
@@ -34,6 +34,9 @@ def extract_preferences(
     s3_secret_key: str,
     pref_output_bucket: str = "mlflow-artifacts",
     system_prompt: str = "",
+    mlflow_experiment: str = "AgentBuilder-Final",
+    run_label: str = "",
+    eval_stage: str = "sft",
     min_score_gap: int = 2,
     max_supplement_questions: int = 5,
 ) -> str:
@@ -208,64 +211,72 @@ def extract_preferences(
 
     preference_pairs = []
 
+    def _correctness_failed(case: dict) -> bool:
+        corr = case.get("judges", {}).get("correctness", {})
+        return corr.get("value") is False
+
     # =====================================================================
-    # Source A: Previous eval_results.json from MLflow
+    # Source A: eval-sft harness failures (same cases we measure at eval time)
     # =====================================================================
     print("=" * 60)
-    print("SOURCE A: Previous eval results from MLflow")
+    print("SOURCE A: eval-sft harness failures (AgentBuilder-Final)")
     print("=" * 60)
     try:
-        print("  Connecting to MLflow...")
         mlflow.set_tracking_uri(mlflow_tracking_uri)
-        experiment = mlflow.get_experiment_by_name("CodeReview-Eval-Hub")
-        if experiment:
-            print(f"  Found experiment: {experiment.experiment_id}")
+        experiment = mlflow.get_experiment_by_name(mlflow_experiment)
+        if not experiment:
+            print(f"  Experiment '{mlflow_experiment}' not found")
+        else:
+            filter_parts = ["tags.eval_type = 'pipeline_benchmark'", f"tags.stage = '{eval_stage}'"]
+            if run_label:
+                filter_parts.append(f"tags.run_label = '{run_label}'")
+            filter_string = " and ".join(filter_parts)
             runs = mlflow.search_runs(
                 experiment_ids=[experiment.experiment_id],
-                filter_string=f"tags.eval_type = 'pipeline_benchmark'",
+                filter_string=filter_string,
                 order_by=["start_time DESC"],
                 max_results=1,
             )
-            if not runs.empty:
+            if runs.empty:
+                print(f"  No eval run found (filter: {filter_string})")
+            else:
                 run_id = runs.iloc[0]["run_id"]
                 print(f"  Found eval run: {run_id}")
-                print(f"  Downloading eval_results.json artifact...")
                 artifact_path = mlflow.artifacts.download_artifacts(
                     run_id=run_id, artifact_path="eval_results.json"
                 )
-                print(f"  Downloaded artifact to: {artifact_path}")
                 with open(artifact_path) as f:
                     eval_data = json.load(f)
+                results = eval_data.get("results", [])
+                print(f"  Loaded {len(results)} eval cases")
 
-                results = eval_data.get("results", eval_data) if isinstance(eval_data, dict) else eval_data
-                if isinstance(results, dict):
-                    results = results.get("results", [])
-                print(f"  Loaded {len(results)} results from eval_results.json")
-
+                source_a = 0
                 for i, r in enumerate(results):
-                    student_score = r.get("student_score", 10)
-                    teacher_score = r.get("teacher_score", 0)
-                    gap = teacher_score - student_score
-
-                    if gap >= min_score_gap and r.get("teacher_answer") and r.get("student_answer"):
-                        preference_pairs.append({
-                            "prompt": r["question"],
-                            "chosen": r["teacher_answer"],
-                            "rejected": r["student_answer"],
-                            "source": "eval_results",
-                            "score_gap": gap,
-                        })
-                    if (i + 1) % 25 == 0:
-                        print(f"    Scanned {i+1}/{len(results)} results, {len(preference_pairs)} pairs so far")
-                print(f"  Source A: {len(preference_pairs)} pairs from eval results (gap >= {min_score_gap})")
-            else:
-                print("  No previous eval runs found in MLflow")
-        else:
-            print("  Experiment 'CodeReview-Eval-Hub' not found")
+                    question = r.get("question", "")
+                    student_answer = r.get("student_answer", "")
+                    if not question or not student_answer:
+                        continue
+                    if not _correctness_failed(r):
+                        continue
+                    teacher_answer = query_teacher(question)
+                    if not teacher_answer:
+                        print(f"    [{i+1}] Teacher empty for failed case, skip")
+                        continue
+                    preference_pairs.append({
+                        "prompt": question,
+                        "chosen": teacher_answer,
+                        "rejected": student_answer,
+                        "source": "eval_sft_harness",
+                        "case_id": r.get("case_id", f"q{i+1}"),
+                    })
+                    source_a += 1
+                print(f"  Source A: {source_a} pairs from harness correctness failures")
     except Exception as exc:
         import traceback
         print(f"  Source A failed: {exc}")
         traceback.print_exc()
+
+    # Legacy fallback removed — old CodeReview-Eval-Hub schema is incompatible.
 
     # =====================================================================
     # Source B: Supplement from question bank

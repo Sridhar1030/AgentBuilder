@@ -29,6 +29,8 @@ def dpo_finetune(
     lora_alpha: int = 32,
     dpo_beta: float = 0.3,
     min_pairs: int = 10,
+    system_prompt: str = "",
+    run_label: str = "",
 ) -> str:
     """Create a TrainJob for single-node multi-GPU DPO training."""
     import time
@@ -49,6 +51,7 @@ def dpo_finetune(
     print(f"  LoRA r/alpha: {lora_r}/{lora_alpha}")
     print(f"  DPO beta:     {dpo_beta}")
     print(f"  Min pairs:    {min_pairs}")
+    print(f"  Run label:    {run_label or '(not set)'}")
     print(f"  Runtime:      torch-distributed (Trainer v2)")
     print("=" * 60)
 
@@ -79,7 +82,7 @@ def dpo_finetune(
 
     namespace = "sridharproject"
     job_name = f"dpo-{int(time.time())}"
-    image = "image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.3.5"
+    image = "image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.3.6"
 
     # --- GPU evacuation and restore helpers ---
     isvc_deployment = "code-review-llm-predictor"
@@ -165,7 +168,12 @@ def dpo_finetune(
         {"name": "S3_ENDPOINT", "value": s3_endpoint},
         {"name": "S3_ACCESS_KEY", "value": s3_access_key},
         {"name": "S3_SECRET_KEY", "value": s3_secret_key},
+        {"name": "MLFLOW_EXPERIMENT", "value": "AgentBuilder-Final"},
     ]
+    if system_prompt:
+        env_list.append({"name": "DPO_SYSTEM_PROMPT", "value": system_prompt})
+    if run_label:
+        env_list.append({"name": "RUN_LABEL", "value": run_label})
 
     trainjob = {
         "apiVersion": f"{TRAINJOB_GROUP}/{TRAINJOB_VERSION}",

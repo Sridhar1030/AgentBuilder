@@ -76,25 +76,25 @@ domain:
 # Hyperparameters. Sensible defaults provided -- tune as needed.
 training:
   sft_epochs: 3
-  dpo_epochs: 3
-  dpo_beta: 0.3
+  dpo_epochs: 2
+  dpo_beta: 0.1
   min_dpo_pairs: 10
-  max_supplement_questions: 5
-  static_bank_sample_size: 300
-  sft_mix_ratio: 0.15
+  max_supplement_questions: 15
+  static_bank_sample_size: 50
+  sft_mix_ratio: 0.20
 
 # -- GRPO CONFIG --------------------------------------------------------------
 # Third training stage after DPO: online RL with verifiable reward functions.
 grpo:
   num_generations: 2
   learning_rate: 5.0e-7
-  num_epochs: 1
+  num_epochs: 2
   beta: 0.0
   temperature: 0.7
   min_prompts: 10
   max_completion_length: 256
   loss_type: grpo
-  reward_weights: [2.0, 0.8, 0.3]
+  reward_weights: [3.0, 0.8, 0.3]
   diff_bank_path: "s3://mlflow-artifacts/synthetic/code-review/diff-bank.json"
   use_vllm: false
 

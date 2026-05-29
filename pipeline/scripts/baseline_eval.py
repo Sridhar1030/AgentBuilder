@@ -3,9 +3,10 @@
 Baseline Evaluation -- Untuned Qwen2.5-Coder-1.5B-Instruct
 
 Loads the raw base model from HuggingFace, runs the same 15 curated test
-diffs used by the pipeline's evaluate step, has the teacher (Ollama 32B)
-grade every response, then logs everything to MLflow and saves a permanent
-baseline scores JSON to MinIO.
+diffs used by the pipeline's evaluate step with agent-eval-harness judges
+(correctness, review_quality, conciseness, format_check), logs to MLflow
+experiment AgentBuilder-Final (run AB_baseline, stage=baseline), and saves
+scores JSON to MinIO for comparison with pipeline eval runs.
 
 Runs as a Kubernetes Job on a single GPU.
 """
@@ -13,8 +14,11 @@ Runs as a Kubernetes Job on a single GPU.
 import json
 import os
 import re
+import subprocess
 import sys
+import textwrap
 import time
+from pathlib import Path
 
 import boto3
 import mlflow
@@ -37,14 +41,50 @@ BASELINE_S3_KEY = os.environ.get("BASELINE_S3_KEY", "baseline/scores.json")
 MODEL_BUCKET = os.environ.get("MODEL_BUCKET", "sridhar-models")
 BASE_MODEL_S3_PREFIX = os.environ.get("BASE_MODEL_S3_PREFIX", "code-review-1.5b-base/")
 
+MLFLOW_EXPERIMENT = os.environ.get("MLFLOW_EXPERIMENT", "AgentBuilder-Final")
+EVAL_YAML_PATH = os.environ.get("EVAL_YAML_PATH", "/opt/config/eval.yaml")
+JUDGE_WEIGHTS = {"correctness": 0.4, "conciseness": 0.2, "review_quality": 0.3, "format_check": 0.1}
+
+
+def _ensure_harness():
+    """Install agent-eval-harness if not present (baseline job image may lack it)."""
+    try:
+        import agent_eval  # noqa: F401
+    except ImportError:
+        print("Installing agent-eval-harness...")
+        subprocess.check_call(
+            [
+                sys.executable, "-m", "pip", "install", "-q",
+                "https://github.com/opendatahub-io/agent-eval-harness/archive/refs/heads/main.tar.gz",
+            ],
+        )
+
+
+def load_test_entries():
+    """Load structured test cases (same schema as pipeline evaluate)."""
+    tq_file = os.environ.get("TEST_QUESTIONS_FILE", "")
+    if tq_file and os.path.exists(tq_file):
+        with open(tq_file) as f:
+            data = json.load(f)
+        entries = []
+        for item in data:
+            if isinstance(item, dict):
+                entries.append(item)
+            else:
+                entries.append({"question": str(item), "has_bug": True, "expected_issues": []})
+        print(f"Loaded {len(entries)} test entries from {tq_file}")
+        return entries
+    # Fallback: legacy string-only list below
+    return None
+
+
 # ── Test questions: load from file if TEST_QUESTIONS_FILE env is set ──────
-_tq_file = os.environ.get("TEST_QUESTIONS_FILE", "")
-if _tq_file and os.path.exists(_tq_file):
-    with open(_tq_file) as _f:
-        _tq_data = json.load(_f)
-    TEST_QUESTIONS = [item["question"] if isinstance(item, dict) else item for item in _tq_data]
-    print(f"Loaded {len(TEST_QUESTIONS)} test questions from {_tq_file}")
+_tq_entries = load_test_entries()
+if _tq_entries is not None:
+    TEST_ENTRIES = _tq_entries
+    TEST_QUESTIONS = [e["question"] for e in TEST_ENTRIES]
 else:
+    TEST_ENTRIES = None
     TEST_QUESTIONS = [
     "Review the following code diff and identify any issues:\n\nFile: pkg/controller/job_controller.go\nLanguage: Go\n\n```diff\n@@ -189,7 +189,7 @@\n func (p *Progress) buildProgressServerCaCrtConfigMap(ctx context.Context, trainJob *trainer.TrainJob) (*corev1ac.ConfigMapApplyConfiguration, error) {\n \tsecret := &corev1.Secret{}\n \tif err := p.client.Get(ctx, secretKey, secret); err == nil {\n \t\tif _, ok := secret.Data[\"ca.crt\"]; !ok {\n-\t\t\treturn nil, fmt.Errorf(\"ca.crt not found: %w\", err)\n+\t\t\treturn nil, fmt.Errorf(\"ca.crt not found in TLS secret\")\n \t\t}\n```",
     "Review the following code diff and identify any issues:\n\nFile: test/e2e/testdata/status_update.py\nLanguage: Python\n\n```diff\n@@ -0,0 +1,30 @@\n+import os, urllib.request\n+\n+token = open(os.environ[\"KUBEFLOW_TRAINER_SERVER_TOKEN\"]).read()\n+req = urllib.request.Request(url, method=\"POST\")\n+req.add_header(\"Authorization\", f\"Bearer {token}\")\n```",
@@ -149,6 +189,135 @@ def query_base_model(model, tokenizer, question):
     return tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
 
 
+def run_harness_benchmark(model, tokenizer, entries):
+    """Run same judges as pipeline evaluate.py for apples-to-apples metrics."""
+    _ensure_harness()
+    from agent_eval.config import EvalConfig
+
+    eval_path = EVAL_YAML_PATH
+    if not os.path.exists(eval_path):
+        repo_eval = Path(__file__).resolve().parents[2] / "eval" / "eval.yaml"
+        eval_path = str(repo_eval) if repo_eval.exists() else eval_path
+    config = EvalConfig.from_yaml(eval_path)
+    print(f"  Loaded {len(config.judges)} harness judges from {eval_path}")
+
+    def _make_inline_check(jc):
+        source = jc.check
+        wrapped = f"def _check(outputs):\n{textwrap.indent(source, '    ')}"
+        code = compile(wrapped, f"<check:{jc.name}>", "exec")
+        ns = {"__builtins__": __builtins__}
+        exec(code, ns)
+        return ns["_check"]
+
+    def _make_llm_judge(jc):
+        prompt_template = jc.prompt or ""
+
+        def scorer(outputs=None):
+            outputs = outputs or {}
+            review = outputs.get("artifacts_content", "")
+            question = outputs.get("question", "")
+            annotations = outputs.get("annotations", {})
+            if not review:
+                return 1, "No review output found"
+            prompt = prompt_template.replace(
+                "{{ outputs }}",
+                f"## Student Review\n\n{review}\n\n## Code Diff\n\n{question}",
+            )
+            prompt = prompt.replace(
+                "{{ annotations }}",
+                f"## Annotations\n\n{json.dumps(annotations, indent=2)}",
+            )
+            raw = teacher_call(
+                [
+                    {"role": "system", "content": "You are a code review quality judge. Return only JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=200,
+                temperature=0.0,
+            )
+            try:
+                parsed = json.loads(raw)
+                score = parsed.get("score", 3)
+            except json.JSONDecodeError:
+                m = re.search(r'"score"\s*:\s*(\d+)', raw)
+                score = int(m.group(1)) if m else 3
+                parsed = {"rationale": raw[:200]}
+            score = max(1, min(5, score))
+            return score, parsed.get("rationale", raw[:200])
+
+        return scorer
+
+    judges = []
+    for jc in config.judges:
+        if jc.check:
+            judges.append((jc.name, _make_inline_check(jc)))
+        elif jc.prompt or jc.prompt_file:
+            judges.append((jc.name, _make_llm_judge(jc)))
+
+    judge_aggregates = {name: {"values": []} for name, _ in judges}
+    harness_results = []
+
+    for i, entry in enumerate(entries):
+        q = entry.get("question", entry) if isinstance(entry, dict) else str(entry)
+        print(f"--- Harness Q{i+1}/{len(entries)} ---")
+        answer = query_base_model(model, tokenizer, q)
+        annotations = {
+            "has_bug": entry.get("has_bug", True) if isinstance(entry, dict) else True,
+            "expected_issues": entry.get("expected_issues", []) if isinstance(entry, dict) else [],
+            "expected_behavior": entry.get("expected_behavior", "") if isinstance(entry, dict) else "",
+            "category": entry.get("category", "unknown") if isinstance(entry, dict) else "unknown",
+        }
+        outputs = {
+            "artifacts_content": answer,
+            "annotations": annotations,
+            "question": q,
+        }
+        case_judges = {}
+        for judge_name, scorer_fn in judges:
+            try:
+                result = scorer_fn(outputs)
+                value = result[0] if isinstance(result, tuple) else result
+                case_judges[judge_name] = value
+                judge_aggregates[judge_name]["values"].append(value)
+                if isinstance(value, bool):
+                    print(f"  {judge_name}: {'PASS' if value else 'FAIL'}")
+                else:
+                    print(f"  {judge_name}: {value}/5")
+            except Exception as e:
+                print(f"  {judge_name}: ERROR -- {e}")
+        harness_results.append({"question": q, "answer": answer, "judges": case_judges})
+        time.sleep(1)
+
+    agg_summary = {}
+    for name, data in judge_aggregates.items():
+        values = [v for v in data["values"] if v is not None]
+        if not values:
+            agg_summary[name] = {"mean": None, "pass_rate": None}
+            continue
+        if all(isinstance(v, bool) for v in values):
+            pr = sum(values) / len(values)
+            agg_summary[name] = {"pass_rate": round(pr, 4), "mean": round(pr, 4)}
+        else:
+            mean = sum(values) / len(values)
+            agg_summary[name] = {"mean": round(mean, 4), "pass_rate": None}
+
+    composite_parts = []
+    for name, weight in JUDGE_WEIGHTS.items():
+        agg = agg_summary.get(name, {})
+        if agg.get("pass_rate") is not None:
+            composite_parts.append(agg["pass_rate"] * weight)
+        elif agg.get("mean") is not None:
+            composite_parts.append((agg["mean"] / 5.0) * weight)
+    composite = round(sum(composite_parts), 4) if composite_parts else 0.0
+    print(f"\n  Harness composite_score: {composite}")
+    for name, agg in agg_summary.items():
+        if agg.get("pass_rate") is not None:
+            print(f"  {name}: pass_rate={agg['pass_rate']:.1%}")
+        elif agg.get("mean") is not None:
+            print(f"  {name}: mean={agg['mean']:.2f}/5")
+    return agg_summary, composite, harness_results
+
+
 def upload_model_to_s3(local_path, s3):
     """Upload the downloaded base model files to MinIO for future KServe use."""
     import glob as globmod
@@ -213,8 +382,17 @@ def main():
         else:
             print(f"[{ts()}] Could not find local model cache, skipping S3 upload")
 
-    # ── Run eval ─────────────────────────────────────────────────────────
-    print(f"\n[{ts()}] Running baseline evaluation on {len(TEST_QUESTIONS)} questions...\n")
+    # ── Harness eval (same judges as pipeline — blog metrics) ─────────────
+    entries = TEST_ENTRIES if TEST_ENTRIES else [
+        {"question": q, "has_bug": True, "expected_issues": []} for q in TEST_QUESTIONS
+    ]
+    print(f"\n[{ts()}] Running harness baseline on {len(entries)} questions...\n")
+    agg_summary, composite_score, harness_results = run_harness_benchmark(
+        model, tokenizer, entries
+    )
+
+    # ── Legacy teacher 1-10 grading (reference only) ─────────────────────
+    print(f"\n[{ts()}] Running teacher 1-10 reference grading...\n")
     results = []
     for i, q in enumerate(TEST_QUESTIONS):
         q_short = q[:80].replace("\n", " ")
@@ -283,27 +461,41 @@ def main():
     os.environ["AWS_ACCESS_KEY_ID"] = S3_KEY
     os.environ["AWS_SECRET_ACCESS_KEY"] = S3_SECRET
     mlflow.set_tracking_uri(MLFLOW_URI)
-    mlflow.set_experiment("CodeReview-Eval-Hub")
-    with mlflow.start_run(run_name="baseline-v0-pr-grading"):
+    mlflow.set_experiment("AgentBuilder-Final")
+    with mlflow.start_run(run_name="AB_baseline"):
         mlflow.set_tag("model_version", "v0-baseline")
-        mlflow.set_tag("eval_type", "baseline_v2")
-        mlflow.set_tag("grading_criteria", "pr_comment_style")
+        mlflow.set_tag("eval_type", "harness_benchmark")
+        mlflow.set_tag("eval_framework", "agent-eval-harness-native")
+        mlflow.set_tag("stage", "baseline")
         mlflow.set_tag("model_id", MODEL_ID)
+        mlflow.log_metric("composite_score", composite_score)
+        for name, agg in agg_summary.items():
+            if agg.get("pass_rate") is not None:
+                mlflow.log_metric(f"judge_{name}_pass_rate", agg["pass_rate"])
+            if agg.get("mean") is not None:
+                mlflow.log_metric(f"judge_{name}_mean", agg["mean"])
         mlflow.log_metric("student_avg_score", round(avg_score, 4))
         mlflow.log_metric("teacher_avg_score", round(teacher_avg, 4))
         mlflow.log_metric("score_gap", round(teacher_avg - avg_score, 4))
         for i, r in enumerate(results):
             mlflow.log_metric(f"q{i+1}_student_score", r["student_score"])
             mlflow.log_metric(f"q{i+1}_teacher_score", r.get("teacher_score", 0))
-        mlflow.log_dict({"results": results}, "eval_results.json")
-    print(f"[{ts()}] MLflow baseline-v0 run logged.")
+        mlflow.log_dict({
+            "harness_results": harness_results,
+            "judge_aggregates": agg_summary,
+            "composite_score": composite_score,
+            "teacher_grading_results": results,
+        }, "eval_results.json")
+    print(f"[{ts()}] MLflow AB_baseline run logged to {MLFLOW_EXPERIMENT}.")
 
     # ── Save baseline scores to MinIO ────────────────────────────────────
     baseline_data = {
         "model_id": MODEL_ID,
-        "eval_type": "baseline",
+        "eval_type": "harness_benchmark",
         "timestamp": int(time.time()),
-        "num_questions": len(results),
+        "num_questions": len(entries),
+        "composite_score": composite_score,
+        "judge_aggregates": agg_summary,
         "baseline_avg_score": round(avg_score, 4),
         "teacher_avg_score": round(teacher_avg, 4),
         "per_question": [

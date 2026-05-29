@@ -36,7 +36,12 @@ def evaluate(
     s3_endpoint: str = "",
     s3_access_key: str = "",
     s3_secret_key: str = "",
+    model_bucket: str = "sridhar-models",
+    model_prefix: str = "code-review-1.5b-",
     judge_weights: str = "",
+    mlflow_experiment: str = "AgentBuilder-Final",
+    stage: str = "",
+    run_label: str = "",
 ) -> dict:
     """Evaluate student model using harness judges loaded from eval.yaml.
 
@@ -205,6 +210,26 @@ def evaluate(
 
     # -- Helper functions --------------------------------------------------
 
+    def wait_for_student_ready(max_wait: int = 600, label: str = "startup") -> None:
+        """Block until the student model responds to a health check."""
+        print(f"  Checking student readiness ({label}) at {student_url}...")
+        start = time.time()
+        while time.time() - start < max_wait:
+            try:
+                resp = requests.get(f"{student_url}/v1/models", timeout=15)
+                if resp.ok:
+                    elapsed = int(time.time() - start)
+                    print(f"  Student is ready ({elapsed}s)")
+                    return
+                print(f"  Student returned HTTP {resp.status_code}, retrying...")
+            except requests.RequestException as exc:
+                elapsed = int(time.time() - start)
+                print(f"  Student not reachable yet ({elapsed}s): {exc}")
+            time.sleep(15)
+        raise RuntimeError(
+            f"Student not ready after {max_wait}s at {student_url}"
+        )
+
     student_messages_prefix = []
     if system_prompt:
         student_messages_prefix = [{"role": "system", "content": system_prompt}]
@@ -222,18 +247,24 @@ def evaluate(
                           "messages": messages,
                           "max_tokens": 512, "temperature": 0.3},
                     timeout=120)
-                if resp.status_code in (400, 404, 503):
+                if resp.status_code in (400, 404, 502, 503):
                     wait = min(20 * (attempt + 1), 120)
                     print(f"  [{attempt+1}/{max_retries}] HTTP {resp.status_code}, "
                           f"retry in {wait}s")
-                    time.sleep(wait)
+                    if attempt >= 2:
+                        wait_for_student_ready(max_wait=180, label="mid-eval recovery")
+                    else:
+                        time.sleep(wait)
                     continue
                 resp.raise_for_status()
                 return resp.json()["choices"][0]["message"]["content"]
-            except (requests.ConnectionError, requests.Timeout) as e:
+            except requests.RequestException as e:
                 wait = min(20 * (attempt + 1), 120)
                 print(f"  [{attempt+1}/{max_retries}] {e}, retry in {wait}s")
-                time.sleep(wait)
+                if attempt >= 2:
+                    wait_for_student_ready(max_wait=180, label="mid-eval recovery")
+                else:
+                    time.sleep(wait)
         raise RuntimeError(f"Student unreachable after {max_retries} retries")
 
     def _teacher_call(messages: list, max_tokens: int = 512,
@@ -260,6 +291,8 @@ def evaluate(
         raise RuntimeError(f"Teacher unreachable after 8 retries: {last_error}")
 
     # -- Run evaluation ----------------------------------------------------
+
+    wait_for_student_ready(max_wait=600, label="pre-eval")
 
     print("\n" + "=" * 60)
     print("RUNNING HARNESS JUDGES")
@@ -424,10 +457,18 @@ def evaluate(
     composite = 0.0
     if mlflow_tracking_uri:
         mlflow.set_tracking_uri(mlflow_tracking_uri)
-        mlflow.set_experiment("CodeReview-Eval-Hub")
-        with mlflow.start_run(run_name=f"pipeline-eval-{model_version}"):
+        mlflow.set_experiment(mlflow_experiment)
+        label = run_label or model_version
+        run_name = (
+            f"{label}-{stage}-eval" if stage else f"pipeline-eval-{label}"
+        )
+        with mlflow.start_run(run_name=run_name):
             mlflow.set_tag("model_version", model_version)
+            if run_label:
+                mlflow.set_tag("run_label", run_label)
             mlflow.set_tag("eval_type", "pipeline_benchmark")
+            if stage:
+                mlflow.set_tag("stage", stage)
             mlflow.set_tag("eval_framework", "agent-eval-harness-native")
             mlflow.set_tag("quality_gate", gate_result)
 
@@ -473,6 +514,28 @@ def evaluate(
         print(f"MLflow run logged to {mlflow_tracking_uri}")
     else:
         print("mlflow_tracking_uri not set -- skipping MLflow logging")
+
+    # -- Write .gate-passed marker to S3 if quality gate passed (GRPO only) --
+    if gate_result == "pass" and stage == "grpo" and s3_endpoint and model_version:
+        try:
+            s3c = boto3.client("s3", endpoint_url=s3_endpoint,
+                aws_access_key_id=s3_access_key,
+                aws_secret_access_key=s3_secret_key)
+            stage_suffix = f"-{stage}" if stage and stage != "sft" else ""
+            marker_key = f"{model_prefix}{model_version}{stage_suffix}/.gate-passed"
+            s3c.put_object(
+                Bucket=model_bucket,
+                Key=marker_key,
+                Body=json.dumps({
+                    "gate_result": gate_result,
+                    "composite_score": round(composite, 4),
+                    "stage": stage,
+                    "run_label": run_label,
+                }).encode(),
+            )
+            print(f"  Wrote .gate-passed marker to s3://{model_bucket}/{marker_key}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to write .gate-passed marker: {e}") from e
 
     return {
         "num_questions": len(results),

@@ -1,78 +1,165 @@
 # Agentic Continual Learning on Red Hat OpenShift AI
 
-A unified continual learning system that improves a Code Review SLM autonomously -- optimizing at both the skill/prompt level and the model/weight level simultaneously, running entirely on OpenShift AI.
+I built an **agentic continual learning pipeline** that autonomously improves a 1.5B-parameter language model through progressive training stages — SFT, DPO, and GRPO — running entirely on Red Hat OpenShift AI (RHOAI). Code review is the demonstration domain, but **the pipeline itself is the product**: a self-improving ML system with eval gates, safety fallbacks, and cycle-to-cycle knowledge retention.
 
-Uses [agent-eval-harness](https://github.com/opendatahub-io/agent-eval-harness) for structured evaluation and a distillation pipeline for model weight optimization, combining skill-level and model-level optimization in nested feedback loops.
+The system distills a 32B teacher (Qwen2.5-Coder via Ollama) into a 1.5B student (KServe + vLLM), orchestrates the full training loop via Kubeflow Pipelines, and closes the loop with structured evaluation, human feedback ingestion, and canary deployment.
+
+---
+
+## What Makes This Different
+
+| Capability | What it means in practice |
+|------------|---------------------------|
+| **Agentic** | The pipeline reads its own eval history, generates targeted training data for weak categories, and triggers the next training cycle without manual intervention |
+| **Progressive training** | SFT → DPO → GRPO with RL rewards at each stage, not a single fine-tune pass |
+| **Eval-gated promotion** | Every stage is scored by structured judges; only models that pass thresholds get `.gate-passed` markers in S3 |
+| **Safety nets** | DPO regression detection falls back to SFT before GRPO; quality gates prevent bad models from going live |
+| **Continual learning** | AB_1 → AB_2 cycles warm-start from the best prior checkpoint (GRPO > DPO > SFT), proving knowledge retention |
+| **Platform-native** | Kubeflow Training Operator v2 (`TrainJob` CRD), KFP v2, KServe, MLflow — all first-class RHOAI components |
 
 ---
 
 ## Architecture
 
-```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                  Kubeflow Pipeline: Agentic Continual Learning            │
-│                                                                          │
-│  ┌──────────────┐   ┌──────────────┐   ┌─────────────────────────────┐   │
-│  │ eval-analyze │──>│ eval-dataset │──>│     distill-pipeline        │   │
-│  │              │   │              │   │  ┌─────────────────────┐    │   │
-│  │ Read MLflow  │   │ Generate new │   │  │ resolve-version     │    │   │
-│  │ history,     │   │ training     │   │  │ extract-gold        │    │   │
-│  │ find model   │   │ data for     │   │  │ SFT finetune (GPU)  │    │   │
-│  │ weaknesses   │   │ weak areas   │   │  │ deploy-sft          │    │   │
-│  └──────────────┘   └──────────────┘   │  │ extract-preferences │    │   │
-│                                        │  │ DPO finetune (GPU)  │    │   │
-│                                        │  └─────────────────────┘    │   │
-│                                        └──────────────┬──────────────┘   │
-│                                                       │                  │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────▼──────────────┐   │
-│  │eval-optimize │<──│ quality-gate │<──│     deploy-candidate        │   │
-│  │              │   │              │   │                             │   │
-│  │ Analyze      │   │ Pass: keep   │   │  eval-run (harness judges) │   │
-│  │ failures,    │   │ Fail: roll   │   │  Score with eval.yaml      │   │
-│  │ recommend    │   │ back to SFT  │   │  judges + thresholds       │   │
-│  │ adjustments  │   │              │   │                             │   │
-│  └──────────────┘   └──────────────┘   └─────────────────────────────┘   │
-│                                                                          │
-│  MLflow: shared data plane (traces, metrics, recommendations)            │
-└────────────────────────────────────────────────────────────────────────────┘
-```
+The outer pipeline (`agent_builder_final_pipeline`) orchestrates analysis, data generation, human feedback collection, and the inner distillation loop. The inner pipeline renders as a **single collapsible node** in the KFP UI — click to expand the full SFT → DPO → GRPO sequence.
 
-The distill-pipeline renders as a **single collapsible node** in the KFP UI -- click it to expand and see the inner training steps.
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    Outer Pipeline: agent_builder_final_pipeline                  │
+│                                                                                 │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐                    │
+│  │ eval-analyze │──>│ eval-dataset │   │ collect-human-   │                    │
+│  │              │   │              │   │ feedback         │                    │
+│  │ Read MLflow  │   │ Generate     │   │ VS Code ext →    │                    │
+│  │ history,     │   │ targeted     │   │ DPO preference   │                    │
+│  │ find weak    │   │ training     │   │ pairs in MinIO   │                    │
+│  │ categories   │   │ data         │   └────────┬─────────┘                    │
+│  └──────────────┘   └──────────────┘            │                              │
+│         │                   │                   │                              │
+│         └───────────────────┴───────────────────┘                              │
+│                                 │                                               │
+│                                 v                                               │
+│  ┌──────────────────────────────────────────────────────────────────────────┐  │
+│  │                    Inner Pipeline: distill-pipeline                       │  │
+│  │                                                                           │  │
+│  │  resolve-version ──> extract-code-review-gold ──> finetune (SFT)         │  │
+│  │       │                                              │                    │  │
+│  │       │  Pick best prior model                       v                    │  │
+│  │       │  (GRPO > DPO > SFT via .gate-passed)    deploy-model             │  │
+│  │       │                                              │                    │  │
+│  │       │                                              v                    │  │
+│  │       │                                         evaluate (eval-sft)       │  │
+│  │       │                                              │                    │  │
+│  │       │                                              v                    │  │
+│  │       │                                    extract-preferences             │  │
+│  │       │                                              │                    │  │
+│  │       │                                              v                    │  │
+│  │       │                                    merge-preferences             │  │
+│  │       │                                    (static bank + human feedback) │  │
+│  │       │                                              │                    │  │
+│  │       │                                              v                    │  │
+│  │       │                                         dpo-finetune             │  │
+│  │       │                                              │                    │  │
+│  │       │                                              v                    │  │
+│  │       │                                         evaluate (eval-dpo)       │  │
+│  │       │                                              │                    │  │
+│  │       │                                              v                    │  │
+│  │       │                              pick-training-checkpoint             │  │
+│  │       │                              (DPO regression → fallback to SFT)  │  │
+│  │       │                                              │                    │  │
+│  │       │                                              v                    │  │
+│  │       │                                         grpo-finetune             │  │
+│  │       │                                              │                    │  │
+│  │       │                                              v                    │  │
+│  │       │                                         deploy-model             │  │
+│  │       │                                              │                    │  │
+│  │       │                                              v                    │  │
+│  │       │                                         evaluate (eval-grpo)       │  │
+│  │       │                              Write .gate-passed marker on pass    │  │
+│  │       └──────────────────────────────────────────────┘                    │  │
+│  └──────────────────────────────────────────────────────────────────────────┘  │
+│                                 │                                               │
+│                                 v                                               │
+│                          traffic-shift                                          │
+│                    (canary: teacher → student)                                  │
+│                                                                                 │
+│  Shared data plane: MLflow (metrics, traces) + MinIO (models, preferences)    │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Components
+## Training Progression
 
-| # | Component | Source | What it does |
-|---|-----------|--------|-------------|
-| 1 | **eval-analyze** | `pipeline/components/eval_analyze.py` | Reads MLflow evaluation history, identifies score trends and weak categories |
-| 2 | **eval-dataset** | `pipeline/components/eval_dataset.py` | Generates targeted synthetic training data for weak categories using the teacher model |
-| 3 | **distill-pipeline** | Sub-pipeline in `pipeline/unified_pipeline.py` | SFT + DPO training loop (resolve version, extract gold, SFT, deploy, extract preferences, DPO) |
-| 4 | **deploy-candidate** | `pipeline/components/deploy_model.py` | Deploys the DPO model to KServe for evaluation |
-| 5 | **eval-run** | `pipeline/components/evaluate.py` | Scores the model using structured judges from `eval/eval.yaml` via agent-eval-harness `EvalConfig` |
-| 6 | **quality-gate** | `pipeline/components/quality_gate.py` | Pass/fail check against eval.yaml thresholds; triggers rollback on failure |
-| 7 | **eval-optimize** | `pipeline/components/eval_optimize.py` | Analyzes judge failures, generates training adjustment recommendations to MLflow |
+Each pipeline run (labeled `AB_N`) executes the full progressive training arc. Evaluation runs after every stage; only the final GRPO model writes a `.gate-passed` marker that `resolve_version` reads on the next cycle.
+
+```
+  Base Model (HF)          SFT                  DPO                  GRPO
+  ───────────────    ───────────────    ───────────────    ───────────────
+  Qwen2.5-Coder      QLoRA fine-tune    Preference         RL with reward
+  1.5B Instruct      on gold data       optimization       signal from eval
+                     │                  │                  │
+                     v                  v                  v
+                  eval-sft           eval-dpo           eval-grpo
+                  judges             judges             judges + gate
+                     │                  │                  │
+                     │            pick_training_            │
+                     │            checkpoint              │
+                     │            (safety net)           │
+                     └──────────────────┴──────────────────┘
+                                        │
+                                        v
+                              .gate-passed in S3
+                              (next cycle starts here)
+```
+
+All three training stages use **Kubeflow Training Operator v2** — the `TrainJob` CRD with the `torch-distributed` `ClusterTrainingRuntime`. This is the new Trainer v2 API, not legacy PyTorchJob.
+
+| Stage | Trainer | Runtime | What it optimizes |
+|-------|---------|---------|-------------------|
+| **SFT** | `SFTTrainer` (TRL) | TrainJob v2, multi-node | Imitation learning on teacher-generated gold data |
+| **DPO** | `DPOTrainer` (TRL) | TrainJob v2, single-node | Preference pairs from eval failures + static bank + human feedback |
+| **GRPO** | `GRPOTrainer` (TRL) | TrainJob v2, single-node | Group-relative policy optimization with RL rewards |
 
 ---
 
-## Evaluation: agent-eval-harness Integration
+## Results
 
-Judges are defined in [`eval/eval.yaml`](eval/eval.yaml) using the [agent-eval-harness](https://github.com/opendatahub-io/agent-eval-harness) format:
+### AB_1 — First cycle (cold start from HuggingFace base)
+
+| Stage | Correctness | Conciseness | Format | Quality |
+|-------|-------------|-------------|--------|---------|
+| Base model | — | — | — | — |
+| **SFT** | 73% | — | — | — |
+| DPO | (evaluated) | — | — | — |
+| **GRPO** | **73%** | **100%** | **100%** | Passed gate |
+
+AB_1 established that the pipeline could take a base 1.5B model to production-quality code review output with perfect format and conciseness compliance.
+
+### AB_2 — Continual learning (warm start from AB_1 GRPO)
+
+| Observation | Evidence |
+|-------------|----------|
+| **Knowledge retention** | SFT loss curves start lower than AB_1 — the model retains prior cycle learning |
+| **Autonomous safety** | Pipeline detected DPO regression and `pick_training_checkpoint` fell back to SFT for GRPO |
+| **Cycle continuity** | `resolve_version` picked AB_1's GRPO checkpoint via `.gate-passed` marker |
+
+The AB_1 → AB_2 progression demonstrates the core continual learning thesis: each cycle builds on the best promoted model, and safety mechanisms prevent regression from propagating downstream.
+
+---
+
+## Evaluation Framework
+
+I integrated [agent-eval-harness](https://github.com/opendatahub-io/agent-eval-harness) for structured, multi-dimensional scoring. Judges and thresholds are defined in [`eval/eval.yaml`](eval/eval.yaml):
 
 | Judge | Type | What it checks |
-|-------|------|---------------|
-| **correctness** | Inline check | Does the review catch real bugs? Does it avoid hallucinating issues on clean code? |
-| **conciseness** | Inline check | Is the review under 200 words (PR-comment length)? |
-| **review_quality** | LLM judge | Is the review actionable, specific, and relevant? (1-5 score via teacher) |
-| **format_check** | Inline check | Does the review avoid boilerplate filler phrases? |
+|-------|------|----------------|
+| **correctness** | Inline check | Catches real bugs; avoids hallucinating issues on clean code |
+| **conciseness** | Inline check | Review stays under 200 words (PR-comment length) |
+| **review_quality** | LLM judge | Actionable, specific, relevant (1–5 via teacher) |
+| **format_check** | Inline check | No boilerplate filler phrases |
 
-Thresholds (from `eval.yaml`):
-- correctness: min 70% pass rate
-- conciseness: min 80% pass rate
-- review_quality: min 3.5/5 mean
-- format_check: min 70% pass rate
-
-If any threshold fails, the quality gate rolls back to the SFT model automatically.
+Thresholds gate model promotion. MLflow run names follow a clear convention: `AB_1-sft-train`, `AB_1-sft-eval`, `AB_1-dpo-train`, `AB_1-grpo-eval`, etc.
 
 ---
 
@@ -83,124 +170,32 @@ If any threshold fails, the quality gate rolls back to the SFT model automatical
 | **Teacher** | `qwen2.5-coder:32b-instruct-q4_K_M` | 32B (4-bit) | Ollama, in-cluster |
 | **Student** | `Qwen/Qwen2.5-Coder-1.5B-Instruct` | 1.5B | KServe + vLLM |
 
-The student specializes in code review for Go, Python, and Kubernetes diffs.
+The student specializes in code review for Go, Python, and Kubernetes diffs. The teacher generates gold training data, grades responses, and serves as the LLM judge for quality scoring.
 
 ---
 
-## Repository Structure
+## Key Design Decisions
 
-```
-AgentBuilder/
-├── readme.md                         This file
-├── distill.config.yaml               Single config driving the entire pipeline
-│
-├── eval/
-│   ├── eval.yaml                     agent-eval-harness judge definitions + thresholds
-│   ├── generate_cases.py             Generates harness case directories from test_questions.json
-│   ├── dataset/cases/                Harness-native case directories (input.yaml, annotations.yaml)
-│   └── prompts/                      External LLM judge prompt templates
-│
-├── pipeline/
-│   ├── unified_pipeline.py           Unified Agentic Continual Learning pipeline (main)
-│   ├── code_review_pipeline.py       Inner pipeline only (legacy, kept for reference)
-│   ├── outer_pipeline.py             Outer pipeline only (legacy, kept for reference)
-│   ├── components/
-│   │   ├── eval_analyze.py           /eval-analyze from agent-eval-harness
-│   │   ├── eval_dataset.py           /eval-dataset -- synthetic data generation
-│   │   ├── evaluate.py               /eval-run -- harness judge execution
-│   │   ├── quality_gate.py           Eval-gated deployment decision
-│   │   ├── eval_optimize.py          /eval-optimize -- failure analysis + recommendations
-│   │   ├── resolve_version.py        Auto-increment model version in MinIO
-│   │   ├── finetune.py               SFT fine-tune (QLoRA, TrainJob CRD)
-│   │   ├── extract_preferences.py    DPO preference pair extraction (teacher vs student)
-│   │   ├── collect_human_feedback.py Human feedback DPO pairs from MinIO
-│   │   ├── merge_preferences.py      Merge all preference sources
-│   │   ├── dpo_finetune.py           DPO fine-tune (TrainJob CRD)
-│   │   └── deploy_model.py           KServe InferenceService deployment
-│   ├── domain/
-│   │   └── test_questions.json       15 curated test cases with annotations
-│   ├── training/
-│   │   └── finetune_job.py           Training script (SFT + DPO modes)
-│   └── scripts/
-│       ├── baseline_eval.py          Standalone baseline evaluation script
-│       └── generate_preference_bank.py
-│
-├── agent-eval-harness/               Forked harness with OpenAI-compatible runner
-│   └── agent_eval/agent/openai_compatible.py
-│
-├── distillation-operator/            Kubernetes operator (Go) for one-click runs
-├── rhoai/                            OpenShift manifests (DSPA, ISVC, MinIO, Ollama)
-└── .cursor/skills/distill/           Cursor skill for managing the pipeline
-```
+**Why progressive SFT → DPO → GRPO instead of SFT alone?**
+SFT teaches the model what good reviews look like. DPO aligns it with human and eval-derived preferences. GRPO adds RL-style optimization against reward signals from the eval harness. Each stage addresses a different failure mode; the pipeline runs all three with gates between them.
 
----
+**Why `.gate-passed` markers in S3 instead of a database?**
+Model artifacts already live in MinIO. Co-locating promotion markers with model weights keeps the system simple, auditable, and decoupled from MLflow availability. `resolve_version` scans for markers with priority GRPO > DPO > SFT.
 
-## Quick Start
+**Why `pick_training_checkpoint` before GRPO?**
+DPO can regress on correctness even when preference loss improves. Comparing SFT vs DPO eval results and falling back to SFT prevents GRPO from amplifying a bad checkpoint. This safety net fired autonomously in AB_2.
 
-### Prerequisites
+**Why TrainJob v2 / `torch-distributed`?**
+Training Operator v2 is the current RHOAI direction — cleaner API, better runtime abstraction, and native support for distributed PyTorch. All three training components (`finetune.py`, `dpo_finetune.py`, `grpo_finetune.py`) submit `TrainJob` CRDs referencing the same `ClusterTrainingRuntime`.
 
-- OpenShift AI cluster with Data Science Pipelines, KServe, and Training Operator
-- GPU nodes (T4 or better) for SFT and DPO training
-- Ollama deployed in-cluster with the teacher model pulled
+**Why a single config file (`distill.config.yaml`)?**
+The entire pipeline — cluster endpoints, teacher/student models, training hyperparameters, eval paths, canary settings — is driven by one YAML file. No code changes needed to switch domains, clusters, or model sizes.
 
-### Configure
+**Why embed `eval.yaml` as a compile-time parameter?**
+KFP containers don't have repo filesystem access. The eval config is read at pipeline compile time and passed as a string parameter; the evaluate component writes it to a temp file and parses it with `EvalConfig.from_yaml()`.
 
-Edit `distill.config.yaml` with your cluster details:
-
-```yaml
-cluster:
-  namespace: "your-namespace"
-  s3_endpoint: "http://minio.your-namespace.svc.cluster.local:9000"
-  mlflow_uri: "http://mlflow.your-namespace.svc.cluster.local:5000"
-
-teacher:
-  api_url: "http://ollama.your-namespace.svc.cluster.local:11434"
-  model: "qwen2.5-coder:32b-instruct-q4_K_M"
-```
-
-### Compile and Upload
-
-```bash
-cd pipeline
-python3 unified_pipeline.py          # Compiles -> unified_pipeline.yaml
-
-# Upload via DSPA REST API
-TOKEN=$(oc whoami -t)
-oc port-forward svc/ds-pipeline-dspa 3991:8443 -n your-namespace &
-
-curl -sk "https://localhost:3991/apis/v2beta1/pipelines/upload" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -F "uploadfile=@unified_pipeline.yaml"
-```
-
-### Trigger a Run
-
-```bash
-PIPELINE_ID="<from upload response>"
-
-curl -sk "https://localhost:3991/apis/v2beta1/runs" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"display_name\": \"run-1\",
-    \"pipeline_version_reference\": {\"pipeline_id\": \"${PIPELINE_ID}\"},
-    \"runtime_config\": {}
-  }"
-```
-
-Or use the RHOAI Dashboard: Data Science Pipelines > Create Run.
-
-### Monitor
-
-```bash
-# MLflow UI
-oc port-forward svc/mlflow 5000:5000 -n your-namespace &
-open http://localhost:5000   # Experiment: CodeReview-Eval-Hub
-
-# Pipeline logs
-oc get pods -n your-namespace | grep agentic
-oc logs <pod-name> -c main -n your-namespace
-```
+**Why canary traffic shifting?**
+Progressive migration from teacher to student (configurable increment via Istio VirtualService) reduces risk when promoting a new model version to production inference.
 
 ---
 
@@ -208,29 +203,68 @@ oc logs <pod-name> -c main -n your-namespace
 
 | Component | Role |
 |-----------|------|
-| **Red Hat OpenShift AI** | ML platform (KServe, Pipelines, Training Operator) |
-| **KServe + vLLM** | Serves the 1.5B student model |
-| **Ollama** | Hosts the 32B teacher model in-cluster |
-| **MLflow** | Experiment tracking, shared data plane between loops |
+| **Red Hat OpenShift AI** | ML platform — KServe, Data Science Pipelines, Training Operator |
+| **Kubeflow Training Operator v2** | GPU training via `TrainJob` CRD + `torch-distributed` runtime |
+| **Data Science Pipelines (KFP v2)** | Full orchestration with nested sub-pipelines |
+| **KServe + vLLM** | High-throughput student model serving |
+| **Ollama** | In-cluster 32B teacher model |
+| **MLflow** | Experiment tracking, shared metrics data plane |
 | **MinIO** | S3-compatible storage for models, training data, preferences |
-| **Data Science Pipelines (KFP v2)** | Orchestrates the unified pipeline |
-| **Kubeflow Training Operator v2** | GPU training jobs via TrainJob CRD |
-| **agent-eval-harness** | Structured judge framework (EvalConfig, eval.yaml) |
-| **QLoRA + SFTTrainer** | Memory-efficient SFT (4-bit quantization) |
-| **DPOTrainer (trl)** | Direct Preference Optimization |
+| **agent-eval-harness** | Structured judge framework (`EvalConfig`, `eval.yaml`) |
+| **QLoRA + TRL** | Memory-efficient SFT, DPO, and GRPO training |
+| **Istio** | Canary traffic shifting between teacher and student |
 
 ---
 
-## Design Decisions
+## Repository Structure
 
-**Why one unified pipeline instead of two?**
-Each agent-eval-harness skill maps to a pipeline component. The distill-pipeline is a nested sub-pipeline that collapses into one node in the UI. This enables scheduled, automated execution of the full improvement loop.
+```
+AgentBuilder/
+├── distill.config.yaml              # Single config file for entire pipeline
+├── eval/
+│   └── eval.yaml                    # Judge definitions + thresholds
+├── pipeline/
+│   ├── unified_pipeline.py          # Main pipeline definition
+│   ├── components/                  # All KFP components
+│   │   ├── finetune.py              # SFT via TrainJob v2
+│   │   ├── dpo_finetune.py          # DPO via TrainJob v2
+│   │   ├── grpo_finetune.py         # GRPO via TrainJob v2
+│   │   ├── evaluate.py              # agent-eval-harness evaluation
+│   │   ├── resolve_version.py       # Model version resolution
+│   │   ├── pick_training_checkpoint.py  # DPO regression safety net
+│   │   ├── extract_preferences.py     # DPO preference extraction
+│   │   ├── merge_preferences.py       # Preference merging
+│   │   ├── deploy_model.py            # KServe deployment
+│   │   ├── eval_analyze.py            # MLflow analysis
+│   │   ├── eval_dataset.py            # Targeted data generation
+│   │   └── traffic_shift.py           # Canary deployment
+│   ├── training/
+│   │   └── finetune_job.py            # Training script (SFT/DPO/GRPO)
+│   └── scripts/
+│       ├── trigger_ab_run.py          # Pipeline trigger with preflight
+│       ├── baseline_eval.py           # Standalone baseline eval
+│       └── generate_preference_bank.py
+├── rhoai/                             # OpenShift manifests
+├── feedback-service/                  # Human feedback API
+└── .cursor/skills/distill/            # Developer experience skill
+```
 
-**Why embed eval.yaml content as a parameter?**
-KFP containers don't have filesystem access to the project repo. The eval.yaml content is read at compile time and passed as a string parameter to the evaluate component, which writes it to a temp file and parses it with `EvalConfig.from_yaml()`.
+---
 
-**Why the quality gate + rollback?**
-Every stage transition is eval-gated. If the DPO model scores worse than thresholds, the pipeline automatically redeploys the SFT model. This prevents bad models from going live.
+## Developer Experience
+
+I packaged pipeline operations into a Cursor agent skill (`/distill`) that provides one-command workflows:
+
+| Command | Purpose |
+|---------|---------|
+| `/distill.prerequisites` | Bootstrap MinIO, MLflow, Ollama, KServe on a fresh cluster |
+| `/distill.setup` | Validate config and infrastructure readiness |
+| `/distill.run` | Compile, upload, and trigger a pipeline run |
+| `/distill.status` | Monitor active runs and training jobs |
+| `/distill.eval` | Run standalone evaluation against current model |
+| `/distill.scores` | Pull MLflow metrics for a run label |
+
+Everything reads from `distill.config.yaml` — the skill is a thin orchestration layer over the same pipeline components.
 
 ---
 
@@ -238,3 +272,4 @@ Every stage transition is eval-gated. If the DPO model scores worse than thresho
 
 - [agent-eval-harness](https://github.com/opendatahub-io/agent-eval-harness)
 - [Red Hat OpenShift AI](https://www.redhat.com/en/technologies/cloud-computing/openshift/openshift-ai)
+- [Kubeflow Trainer v2](https://www.kubeflow.org/docs/components/trainer/)

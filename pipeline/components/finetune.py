@@ -25,6 +25,7 @@ def finetune(
     learning_rate: float = 2e-4,
     lora_r: int = 16,
     lora_alpha: int = 32,
+    run_label: str = "",
 ) -> str:
     """Create a TrainJob for multi-GPU QLoRA SFT training."""
     import time
@@ -50,7 +51,7 @@ def finetune(
 
     namespace = "sridharproject"
     job_name = f"finetune-{int(time.time())}"
-    image = "image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.3.5"
+    image = "image-registry.openshift-image-registry.svc:5000/sridharproject/distillation-trainer:v1.3.6"
 
     # --- GPU evacuation and restore helpers ---
     isvc_deployment = "code-review-llm-predictor"
@@ -166,6 +167,7 @@ def finetune(
     print(f"  Batch size:   {batch_size}")
     print(f"  LR:           {learning_rate}")
     print(f"  LoRA r/alpha: {lora_r}/{lora_alpha}")
+    print(f"  Run label:    {run_label or '(not set)'}")
     print(f"  Runtime:      torch-distributed (Trainer v2)")
     print("=" * 60)
 
@@ -181,7 +183,10 @@ def finetune(
         {"name": "S3_ENDPOINT", "value": s3_endpoint},
         {"name": "S3_ACCESS_KEY", "value": s3_access_key},
         {"name": "S3_SECRET_KEY", "value": s3_secret_key},
+        {"name": "MLFLOW_EXPERIMENT", "value": "AgentBuilder-Final"},
     ]
+    if run_label:
+        env_list.append({"name": "RUN_LABEL", "value": run_label})
 
     trainjob = {
         "apiVersion": f"{TRAINJOB_GROUP}/{TRAINJOB_VERSION}",

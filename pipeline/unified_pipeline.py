@@ -27,6 +27,7 @@ from components.collect_human_feedback import collect_human_feedback
 from components.merge_preferences import merge_preferences
 from components.dpo_finetune import dpo_finetune
 from components.grpo_finetune import grpo_finetune
+from components.pick_training_checkpoint import pick_training_checkpoint
 from components.deploy_model import deploy_model
 from components.evaluate import evaluate
 from components.quality_gate import quality_gate
@@ -82,6 +83,13 @@ def _extract_weak_categories(analysis: dict) -> str:
     return json.dumps(cats)
 
 
+@dsl.component(base_image="python:3.11-slim")
+def _parse_json_to_list(json_str: str) -> list:
+    """Parse a JSON string into a list for KFP type bridging."""
+    import json
+    return json.loads(json_str) if json_str else []
+
+
 # ==============================================================================
 # SUB-PIPELINE: distill-pipeline (SFT + DPO)
 #
@@ -127,6 +135,8 @@ def distill_pipeline(
     dpo_beta: float = 0.3,
     min_dpo_pairs: int = 10,
     max_supplement_questions: int = 5,
+    static_bank_sample_size: int = 300,
+    sft_mix_ratio: float = 0.15,
     grpo_data_s3_path: str = "",
     grpo_epochs: int = 1,
     grpo_learning_rate: float = 5e-7,
@@ -137,8 +147,12 @@ def distill_pipeline(
     grpo_loss_type: str = "dapo",
     grpo_temperature: float = 0.7,
     grpo_use_vllm: bool = False,
+    test_questions: list = [],
     test_questions_json: str = "",
     weak_categories_json: str = "",
+    eval_yaml_content: str = "",
+    mlflow_experiment: str = "AgentBuilder-Final",
+    run_label: str = "",
 ) -> DistillOutputs:
     # -- Resolve version (auto-increment code-review-1.5b-vN) --
     version_task = resolve_version(
@@ -173,6 +187,7 @@ def distill_pipeline(
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,
         num_epochs=num_epochs,
+        run_label=run_label,
     )
     sft_task.set_caching_options(False)
 
@@ -183,6 +198,33 @@ def distill_pipeline(
         namespace=namespace,
     )
     deploy_sft_task.set_caching_options(False)
+
+    # -- Parse test questions for per-stage evals --
+    test_questions_list = _parse_json_to_list(json_str=test_questions_json)
+    test_questions_list.set_caching_options(False)
+
+    # -- Evaluate SFT model (URL from deploy step after ISVC + vLLM ready) --
+    eval_sft_task = evaluate(
+        student_url=deploy_sft_task.output,
+        teacher_api_url=teacher_api_url,
+        teacher_model=teacher_model,
+        teacher_api_key=teacher_api_key,
+        test_questions=test_questions_list.output,
+        eval_yaml_content=eval_yaml_content,
+        system_prompt=system_prompt,
+        mlflow_tracking_uri=mlflow_tracking_uri,
+        model_version=version_task.outputs["version"],
+        s3_endpoint=s3_endpoint,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+        model_bucket=model_bucket,
+        model_prefix=model_prefix,
+        mlflow_experiment=mlflow_experiment,
+        stage="sft",
+        run_label=run_label,
+    )
+    eval_sft_task.after(deploy_sft_task)
+    eval_sft_task.set_caching_options(False)
 
     # -- Collect human feedback --
     human_fb_task = collect_human_feedback(
@@ -195,7 +237,7 @@ def distill_pipeline(
 
     # -- Extract DPO preference pairs (teacher vs deployed SFT) --
     pref_task = extract_preferences(
-        student_url=f"http://{isvc_name}-predictor.{namespace}.svc.cluster.local:8080",
+        student_url=deploy_sft_task.output,
         teacher_api_url=teacher_api_url,
         teacher_model=teacher_model,
         teacher_api_key=teacher_api_key,
@@ -207,9 +249,12 @@ def distill_pipeline(
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,
         system_prompt=system_prompt,
+        mlflow_experiment=mlflow_experiment,
+        run_label=run_label,
+        eval_stage="sft",
         max_supplement_questions=max_supplement_questions,
     )
-    pref_task.after(deploy_sft_task)
+    pref_task.after(eval_sft_task)
     pref_task.set_caching_options(False)
 
     # -- Merge all preference sources --
@@ -220,6 +265,8 @@ def distill_pipeline(
         s3_endpoint=s3_endpoint,
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,
+        static_bank_sample_size=static_bank_sample_size,
+        sft_mix_ratio=sft_mix_ratio,
     )
     merge_task.set_caching_options(False)
 
@@ -234,12 +281,54 @@ def distill_pipeline(
         num_epochs=dpo_epochs,
         dpo_beta=dpo_beta,
         min_pairs=min_dpo_pairs,
+        system_prompt=system_prompt,
+        run_label=run_label,
     )
     dpo_task.set_caching_options(False)
 
-    # -- GRPO fine-tune (verifiable rewards; after DPO) --
-    grpo_task = grpo_finetune(
+    # -- Deploy DPO model (temporary, for evaluation) --
+    deploy_dpo_task = deploy_model(
+        model_s3_path=dpo_task.output,
+        isvc_name=isvc_name,
+        namespace=namespace,
+    )
+    deploy_dpo_task.set_caching_options(False)
+
+    # -- Evaluate DPO model --
+    eval_dpo_task = evaluate(
+        student_url=deploy_dpo_task.output,
+        teacher_api_url=teacher_api_url,
+        teacher_model=teacher_model,
+        teacher_api_key=teacher_api_key,
+        test_questions=test_questions_list.output,
+        eval_yaml_content=eval_yaml_content,
+        system_prompt=system_prompt,
+        mlflow_tracking_uri=mlflow_tracking_uri,
+        model_version=version_task.outputs["version"],
+        s3_endpoint=s3_endpoint,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+        model_bucket=model_bucket,
+        model_prefix=model_prefix,
+        mlflow_experiment=mlflow_experiment,
+        stage="dpo",
+        run_label=run_label,
+    )
+    eval_dpo_task.after(deploy_dpo_task)
+    eval_dpo_task.set_caching_options(False)
+
+    pick_task = pick_training_checkpoint(
+        sft_model_s3_path=sft_task.output,
         dpo_model_s3_path=dpo_task.output,
+        eval_sft_results=eval_sft_task.output,
+        eval_dpo_results=eval_dpo_task.output,
+    )
+    pick_task.after(eval_dpo_task)
+    pick_task.set_caching_options(False)
+
+    # -- GRPO fine-tune (verifiable rewards; after DPO eval) --
+    grpo_task = grpo_finetune(
+        dpo_model_s3_path=pick_task.output,
         grpo_data_s3_path=grpo_data_s3_path,
         model_version=version_task.outputs["version"],
         s3_endpoint=s3_endpoint,
@@ -258,7 +347,9 @@ def distill_pipeline(
         loss_type=grpo_loss_type,
         weak_categories_json=weak_categories_json,
         use_vllm=grpo_use_vllm,
+        run_label=run_label,
     )
+    grpo_task.after(pick_task)
     grpo_task.set_caching_options(False)
 
     return DistillOutputs(
@@ -289,6 +380,7 @@ def distill_pipeline(
 )
 def agentic_continual_learning_pipeline(
     model_version: str = "",
+    run_label: str = "",
     s3_access_key: str = _CFG["cluster"]["s3_access_key"],
     s3_secret_key: str = _CFG["cluster"]["s3_secret_key"],
     teacher_api_url: str = _CFG["teacher"]["api_url"],
@@ -299,6 +391,8 @@ def agentic_continual_learning_pipeline(
     dpo_beta: float = _CFG["training"]["dpo_beta"],
     min_dpo_pairs: int = _CFG["training"]["min_dpo_pairs"],
     max_supplement_questions: int = _CFG["training"]["max_supplement_questions"],
+    static_bank_sample_size: int = _CFG["training"].get("static_bank_sample_size", 50),
+    sft_mix_ratio: float = _CFG["training"].get("sft_mix_ratio", 0.10),
     max_new_sdg_examples: int = 10,
     grpo_epochs: int = _CFG.get("grpo", {}).get("num_epochs", 1),
     grpo_learning_rate: float = _CFG.get("grpo", {}).get("learning_rate", 5e-7),
@@ -315,7 +409,7 @@ def agentic_continual_learning_pipeline(
     # =========================================================================
     analyze_task = eval_analyze(
         mlflow_tracking_uri=MLFLOW_URI,
-        experiment_name="CodeReview-Eval-Hub",
+        experiment_name="AgentBuilder-Final",
         s3_endpoint=S3_ENDPOINT,
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,
@@ -372,6 +466,8 @@ def agentic_continual_learning_pipeline(
         dpo_beta=dpo_beta,
         min_dpo_pairs=min_dpo_pairs,
         max_supplement_questions=max_supplement_questions,
+        static_bank_sample_size=static_bank_sample_size,
+        sft_mix_ratio=sft_mix_ratio,
         grpo_data_s3_path=_CFG.get("grpo", {}).get(
             "diff_bank_path", QUESTION_BANK_S3
         ),
@@ -384,8 +480,12 @@ def agentic_continual_learning_pipeline(
         grpo_loss_type=grpo_loss_type,
         grpo_temperature=grpo_temperature,
         grpo_use_vllm=grpo_use_vllm,
+        test_questions=TEST_QUESTIONS,
         test_questions_json=json.dumps(TEST_QUESTIONS),
         weak_categories_json=extract_weak_cats.output,
+        eval_yaml_content=EVAL_YAML_CONTENT,
+        mlflow_experiment="AgentBuilder-Final",
+        run_label=run_label,
     )
     distill_task.after(dataset_task)
 
@@ -415,7 +515,13 @@ def agentic_continual_learning_pipeline(
         s3_endpoint=S3_ENDPOINT,
         s3_access_key=s3_access_key,
         s3_secret_key=s3_secret_key,
+        model_bucket=_CFG["cluster"]["model_bucket"],
+        model_prefix=_CFG["student"]["model_prefix"],
+        mlflow_experiment="AgentBuilder-Final",
+        stage="grpo",
+        run_label=run_label,
     )
+    eval_task.after(deploy_candidate_task)
     eval_task.set_caching_options(False)
 
     gate_task = quality_gate(eval_results=eval_task.output)
@@ -473,9 +579,190 @@ def agentic_continual_learning_pipeline(
         shift_task.set_caching_options(False)
 
 
+@dsl.pipeline(
+    name="AgentBuilderPipeline_Final",
+    description=(
+        "Blog metrics pipeline: eval-analyze, eval-dataset, distill (SFT+DPO+GRPO), "
+        "per-stage eval (sft/dpo/grpo), quality gate. Logs to AgentBuilder-Final MLflow."
+    ),
+)
+def agent_builder_final_pipeline(
+    model_version: str = "",
+    run_label: str = "",
+    s3_access_key: str = _CFG["cluster"]["s3_access_key"],
+    s3_secret_key: str = _CFG["cluster"]["s3_secret_key"],
+    teacher_api_url: str = _CFG["teacher"]["api_url"],
+    teacher_model: str = _CFG["teacher"]["model"],
+    teacher_api_key: str = _CFG["teacher"].get("api_key", ""),
+    num_epochs: int = _CFG["training"]["sft_epochs"],
+    dpo_epochs: int = _CFG["training"]["dpo_epochs"],
+    dpo_beta: float = _CFG["training"]["dpo_beta"],
+    min_dpo_pairs: int = _CFG["training"]["min_dpo_pairs"],
+    max_supplement_questions: int = _CFG["training"]["max_supplement_questions"],
+    static_bank_sample_size: int = _CFG["training"].get("static_bank_sample_size", 50),
+    sft_mix_ratio: float = _CFG["training"].get("sft_mix_ratio", 0.10),
+    max_new_sdg_examples: int = 10,
+    grpo_epochs: int = _CFG.get("grpo", {}).get("num_epochs", 1),
+    grpo_learning_rate: float = _CFG.get("grpo", {}).get("learning_rate", 5e-7),
+    grpo_num_generations: int = _CFG.get("grpo", {}).get("num_generations", 2),
+    grpo_beta: float = _CFG.get("grpo", {}).get("beta", 0.0),
+    grpo_min_prompts: int = _CFG.get("grpo", {}).get("min_prompts", 10),
+    grpo_max_completion_length: int = _CFG.get("grpo", {}).get("max_completion_length", 256),
+    grpo_loss_type: str = _CFG.get("grpo", {}).get("loss_type", "grpo"),
+    grpo_temperature: float = _CFG.get("grpo", {}).get("temperature", 0.7),
+    grpo_use_vllm: bool = _CFG.get("grpo", {}).get("use_vllm", False),
+):
+    analyze_task = eval_analyze(
+        mlflow_tracking_uri=MLFLOW_URI,
+        experiment_name="AgentBuilder-Final",
+        s3_endpoint=S3_ENDPOINT,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+    )
+    analyze_task.set_caching_options(False)
+
+    dataset_task = eval_dataset(
+        analysis=analyze_task.output,
+        teacher_api_url=teacher_api_url,
+        teacher_model=teacher_model,
+        teacher_api_key=teacher_api_key,
+        teacher_system_prompt=_CFG["teacher"]["system_prompt"],
+        s3_endpoint=S3_ENDPOINT,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+        data_bucket=_CFG["cluster"]["data_bucket"],
+        output_prefix=SYNTHETIC_PREFIX,
+        model_version=model_version,
+        max_new_examples=max_new_sdg_examples,
+    )
+    dataset_task.set_caching_options(False)
+
+    extract_weak_cats = _extract_weak_categories(analysis=analyze_task.output)
+    extract_weak_cats.set_caching_options(False)
+
+    distill_task = distill_pipeline(
+        s3_endpoint=S3_ENDPOINT,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+        model_bucket=_CFG["cluster"]["model_bucket"],
+        model_prefix=_CFG["student"]["model_prefix"],
+        gold_bucket=TEACHER_BUCKET,
+        base_model_id=BASE_MODEL_ID,
+        synthetic_bucket=SYNTHETIC_BUCKET,
+        synthetic_prefix=SYNTHETIC_PREFIX,
+        isvc_name=ISVC_NAME,
+        namespace=NAMESPACE,
+        teacher_api_url=teacher_api_url,
+        teacher_model=teacher_model,
+        teacher_api_key=teacher_api_key,
+        question_bank_s3=QUESTION_BANK_S3,
+        mlflow_tracking_uri=MLFLOW_URI,
+        system_prompt=TEACHER_SYSTEM_PROMPT,
+        model_version=model_version,
+        num_epochs=num_epochs,
+        dpo_epochs=dpo_epochs,
+        dpo_beta=dpo_beta,
+        min_dpo_pairs=min_dpo_pairs,
+        max_supplement_questions=max_supplement_questions,
+        static_bank_sample_size=static_bank_sample_size,
+        sft_mix_ratio=sft_mix_ratio,
+        grpo_data_s3_path=_CFG.get("grpo", {}).get(
+            "diff_bank_path", QUESTION_BANK_S3
+        ),
+        grpo_epochs=grpo_epochs,
+        grpo_learning_rate=grpo_learning_rate,
+        grpo_num_generations=grpo_num_generations,
+        grpo_beta=grpo_beta,
+        grpo_min_prompts=grpo_min_prompts,
+        grpo_max_completion_length=grpo_max_completion_length,
+        grpo_loss_type=grpo_loss_type,
+        grpo_temperature=grpo_temperature,
+        grpo_use_vllm=grpo_use_vllm,
+        test_questions=TEST_QUESTIONS,
+        test_questions_json=json.dumps(TEST_QUESTIONS),
+        weak_categories_json=extract_weak_cats.output,
+        eval_yaml_content=EVAL_YAML_CONTENT,
+        mlflow_experiment="AgentBuilder-Final",
+        run_label=run_label,
+    )
+    distill_task.after(dataset_task)
+
+    deploy_candidate_task = deploy_model(
+        model_s3_path=distill_task.outputs["grpo_model_path"],
+        isvc_name=ISVC_NAME,
+        namespace=NAMESPACE,
+    )
+    deploy_candidate_task.set_caching_options(False)
+
+    eval_task = evaluate(
+        student_url=deploy_candidate_task.output,
+        teacher_api_url=teacher_api_url,
+        teacher_model=teacher_model,
+        teacher_api_key=teacher_api_key,
+        test_questions=TEST_QUESTIONS,
+        eval_yaml_content=EVAL_YAML_CONTENT,
+        system_prompt=TEACHER_SYSTEM_PROMPT,
+        mlflow_tracking_uri=MLFLOW_URI,
+        model_version=distill_task.outputs["version"],
+        s3_endpoint=S3_ENDPOINT,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+        model_bucket=_CFG["cluster"]["model_bucket"],
+        model_prefix=_CFG["student"]["model_prefix"],
+        mlflow_experiment="AgentBuilder-Final",
+        stage="grpo",
+        run_label=run_label,
+    )
+    eval_task.after(deploy_candidate_task)
+    eval_task.set_caching_options(False)
+
+    gate_task = quality_gate(eval_results=eval_task.output)
+    gate_task.set_caching_options(False)
+
+    optimize_task = eval_optimize(
+        eval_results=eval_task.output,
+        teacher_api_url=teacher_api_url,
+        teacher_model=teacher_model,
+        teacher_api_key=teacher_api_key,
+        current_config=json.dumps(_CFG),
+        dpo_model_s3_path=distill_task.outputs["grpo_model_path"],
+        mlflow_tracking_uri=MLFLOW_URI,
+        model_version=distill_task.outputs["version"],
+        s3_endpoint=S3_ENDPOINT,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+    )
+    optimize_task.after(gate_task)
+    optimize_task.set_caching_options(False)
+
+    with dsl.If(gate_task.output == "fail", name="rollback-on-failure"):
+        rollback_task = deploy_model(
+            model_s3_path=distill_task.outputs["sft_model_path"],
+            isvc_name=ISVC_NAME,
+            namespace=NAMESPACE,
+        )
+        rollback_task.set_caching_options(False)
+
+    if CANARY_ENABLED:
+        shift_task = traffic_shift(
+            eval_results=eval_task.output,
+            gateway_url=CANARY_GATEWAY_URL,
+            namespace=NAMESPACE,
+            virtualservice_name=CANARY_VS_NAME,
+            shift_increment=CANARY_SHIFT_INCREMENT,
+            mlflow_tracking_uri=MLFLOW_URI,
+            model_version=distill_task.outputs["version"],
+            s3_endpoint=S3_ENDPOINT,
+            s3_access_key=s3_access_key,
+            s3_secret_key=s3_secret_key,
+        )
+        shift_task.after(optimize_task)
+        shift_task.set_caching_options(False)
+
+
 if __name__ == "__main__":
     compiler.Compiler().compile(
-        pipeline_func=agentic_continual_learning_pipeline,
-        package_path="unified_pipeline.yaml",
+        pipeline_func=agent_builder_final_pipeline,
+        package_path="AgentBuilderPipeline_Final.yaml",
     )
-    print("Compiled -> unified_pipeline.yaml")
+    print("Compiled -> AgentBuilderPipeline_Final.yaml")

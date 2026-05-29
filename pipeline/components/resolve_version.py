@@ -91,29 +91,37 @@ def resolve_version(
         prev_version = max(version_numbers)
         sft_path = f"s3://{model_bucket}/{model_prefix}v{prev_version}/"
         dpo_path = f"s3://{model_bucket}/{model_prefix}v{prev_version}-dpo/"
-        gate_marker_key = f"{model_prefix}v{prev_version}-dpo/.gate-passed"
+        grpo_path = f"s3://{model_bucket}/{model_prefix}v{prev_version}-grpo/"
 
-        # Prefer the DPO model if it passed the quality gate (marker file exists)
-        use_dpo = False
-        try:
-            s3.head_object(Bucket=model_bucket, Key=gate_marker_key)
-            use_dpo = True
-            print(f"Found .gate-passed marker at {gate_marker_key}")
-        except s3.exceptions.NoSuchKey:
-            print(f"No .gate-passed marker at {gate_marker_key} -- using SFT model")
-        except Exception as e:
-            err_code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
-            if err_code in ("404", "NoSuchKey"):
-                print(f"No .gate-passed marker at {gate_marker_key} -- using SFT model")
-            else:
-                print(f"WARNING: S3 error checking gate marker ({e}) -- falling back to SFT model")
+        def _has_gate_marker(key):
+            try:
+                s3.head_object(Bucket=model_bucket, Key=key)
+                return True
+            except Exception as e:
+                err_code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
+                if err_code not in ("404", "NoSuchKey") and not isinstance(e, s3.exceptions.NoSuchKey):
+                    print(f"  WARNING: S3 error checking {key}: {e}")
+                return False
 
-        if use_dpo:
+        grpo_marker = f"{model_prefix}v{prev_version}-grpo/.gate-passed"
+        dpo_marker = f"{model_prefix}v{prev_version}-dpo/.gate-passed"
+
+        prev_model_path = sft_path
+        chosen_reason = "SFT checkpoint (fallback)"
+
+        if _has_gate_marker(grpo_marker):
+            prev_model_path = grpo_path
+            chosen_reason = "GRPO model (gate passed -- best from previous cycle)"
+            print(f"  Found .gate-passed at {grpo_marker}")
+        elif _has_gate_marker(dpo_marker):
             prev_model_path = dpo_path
-            print(f"Previous model: {prev_model_path} (DPO-improved, gate passed)")
+            chosen_reason = "DPO model (gate passed)"
+            print(f"  Found .gate-passed at {dpo_marker}")
         else:
-            prev_model_path = sft_path
-            print(f"Previous model: {prev_model_path} (SFT checkpoint)")
+            print(f"  No .gate-passed marker at {grpo_marker}")
+            print(f"  No .gate-passed marker at {dpo_marker}")
+
+        print(f"Previous model: {prev_model_path} ({chosen_reason})")
     else:
         prev_model_path = hf_base_model_id
         print(f"No previous model found -- SFT will start from HuggingFace base: {hf_base_model_id}")
